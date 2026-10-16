@@ -1,0 +1,59 @@
+name: Sync upstream OpenCreator
+
+# Keeps this repo mirrored with krillinai/OpenCreator, then re-applies our
+# Apify promo block on top. Runs daily + on demand.
+on:
+  schedule:
+    - cron: '0 11 * * *'  # daily ~7am ET
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out our repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync from upstream and re-apply promo
+        run: |
+          set -e
+          git config user.name "cporter202-sync"
+          git config user.email "cporter202-sync@users.noreply.github.com"
+
+          # Stash our own automation files so the wipe below doesn't kill them
+          mkdir -p /tmp/keep/.github/workflows /tmp/keep/scripts
+          cp .github/workflows/sync-upstream.yml /tmp/keep/.github/workflows/ 2>/dev/null || true
+          cp scripts/inject_apify_ad.py /tmp/keep/scripts/ 2>/dev/null || true
+          cp ATTRIBUTION.md /tmp/keep/ 2>/dev/null || true
+
+          # Fresh shallow copy of upstream (no history needed)
+          rm -rf /tmp/upstream
+          git clone --depth 1 https://github.com/krillinai/OpenCreator.git /tmp/upstream
+
+          # Replace working tree with upstream (keep our .git)
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          tar -C /tmp/upstream --exclude=.git -cf - . | tar -xf - .
+
+          # Restore our automation files
+          mkdir -p .github/workflows scripts
+          cp /tmp/keep/.github/workflows/sync-upstream.yml .github/workflows/
+          cp /tmp/keep/scripts/inject_apify_ad.py scripts/
+          cp /tmp/keep/ATTRIBUTION.md . 2>/dev/null || true
+
+          # Re-apply the Apify promo block (idempotent)
+          python3 scripts/inject_apify_ad.py
+
+          # Commit + push only if something changed
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No upstream changes — nothing to do."
+          else
+            git commit -m "Sync upstream OpenCreator ($(date -u +%Y-%m-%d)) + Apify promo"
+            git push origin HEAD:main
+            echo "Synced and pushed."
+          fi
