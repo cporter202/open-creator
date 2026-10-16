@@ -35,6 +35,19 @@ ANCHORS = [
 ]
 
 
+
+def fix_badges(text):
+    """Point the stars badge at OUR repo and drop upstream's award badges."""
+    # Stars badge -> our repo, so it shows OUR real star count
+    text = text.replace('badgen.net/github/stars/krillinai/OpenCreator',
+                        'badgen.net/github/stars/cporter202/open-creator')
+    text = text.replace('https://github.com/krillinai/OpenCreator/stargazers',
+                        'https://github.com/cporter202/open-creator/stargazers')
+    # TrendShift "#1 repo of the day" award badge -> theirs, not ours; drop it
+    text = re.sub(r'<a href="https://trendshift\\.io[^>]*>.*?</a>\\s*\\n?', '', text, flags=re.DOTALL)
+    return text
+
+
 def main():
     try:
         with open(README, encoding="utf-8") as f:
@@ -59,6 +72,8 @@ def main():
     if not inserted:
         text = PROMO + "\n" + text
         print("promo inserted at top of file (no anchor found)")
+
+    text = fix_badges(text)
 
     with open(README, "w", encoding="utf-8") as f:
         f.write(text)
