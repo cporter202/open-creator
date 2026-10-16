@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenCreator</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="desktop-window-controls" role="group" aria-label="Window controls" hidden>
+      <button type="button" data-action="close" aria-label="Close window" title="Close window"><span aria-hidden="true">×</span></button>
+      <button type="button" data-action="minimize" aria-label="Minimize window" title="Minimize window"><span aria-hidden="true">−</span></button>
+      <button type="button" data-action="zoom" aria-label="Zoom window" title="Zoom window"><span aria-hidden="true">+</span></button>
+    </div>
+    <main class="bootstrap-shell">
+      <section class="bootstrap-panel" aria-live="polite">
+        <span class="brand-name">OpenCreator</span>
+        <div class="status-mark" id="status-mark" aria-hidden="true">
+          <span></span>
+        </div>
+        <h1 id="status-title">Preparing OpenCreator</h1>
+        <p id="status-detail">Checking the local environment</p>
+        <p class="elapsed" id="elapsed" hidden></p>
+
+        <div class="failure-actions" id="failure-actions" hidden>
+          <button class="primary" id="retry" type="button">Retry</button>
+          <button id="select-codex" type="button">Select Codex or ChatGPT</button>
+          <button id="diagnostics" type="button">Export diagnostics</button>
+          <button class="quiet" id="quit" type="button">Quit</button>
+        </div>
+
+        <div class="failure-actions" id="workspace-actions" hidden>
+          <button class="primary" id="reload-workspace" type="button">Reload Dashboard</button>
+          <button id="restart-runtime" type="button">Restart Runtime</button>
+          <button id="workspace-diagnostics" type="button">Export diagnostics</button>
+          <button class="quiet" id="workspace-quit" type="button">Quit</button>
+        </div>
+
+        <details id="technical-details" hidden>
+          <summary>Technical details</summary>
+          <dl>
+            <div><dt>Codex</dt><dd id="codex-path">-</dd></div>
+            <div><dt>CODEX_HOME</dt><dd id="codex-home">-</dd></div>
+            <div><dt>Error code</dt><dd id="error-code">-</dd></div>
+          </dl>
+          <pre id="error-message"></pre>
+        </details>
+      </section>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

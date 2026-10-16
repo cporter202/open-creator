@@ -1,0 +1,247 @@
+# OpenCreator 发布手册
+
+## 1. 适用范围
+
+本文用于发布 OpenCreator Desktop 的 macOS x64、macOS arm64 和 Windows x64 安装包，以及 KrillinAI Server 和 CLI 的 macOS、Windows、Linux 独立程序包。Desktop 安装包包含固定版本的 Codex CLI、KrillinAI CLI、ffmpeg、ffprobe，以及打包时解析的最新 yt-dlp nightly；Whisper CLI 与模型不进入安装包，由 KrillinAI 在功能实际需要时下载到用户数据目录。
+
+发布入口：
+
+```bash
+pnpm desktop:release
+```
+
+单独生成当前目标平台的 KrillinAI Server 和 CLI 发布包：
+
+```bash
+pnpm krillinai:package
+```
+
+本地仅生成可运行目录、构建清单并执行正式包校验：
+
+```bash
+OPENCREATOR_DESKTOP_OFFLINE=1 \
+CSC_IDENTITY_AUTO_DISCOVERY=false \
+pnpm desktop:package
+```
+
+`OPENCREATOR_DESKTOP_OFFLINE=1` 要求 pnpm、Electron headers、原生模块、Codex Runtime 和 Creator Runtime 构建缓存已经完整。缓存缺失时必须明确失败，不能静默切换为在线下载。
+
+在线打包即使命中 Creator Runtime 缓存，也会查询官方 yt-dlp nightly 最新发布。下载按解析出的具体版本地址进行，使用 GitHub 发布附件的 SHA-256（缺失时读取同一版本的 `SHA2-256SUMS`）校验；相同版本且哈希匹配时复用文件。查询、下载或校验失败会终止打包，不回退旧版本。实际版本、下载地址和哈希写入缓存 `versions.json`，版本继续写入包内 Runtime manifest。显式离线模式只使用带有效发布信息且哈希匹配的缓存，不保证缓存版本最新；设置 `OPENCREATOR_YT_DLP_PATH` 时使用显式指定的独立程序。
+
+## 2. 发布前条件
+
+1. Node.js 22。
+2. pnpm 9.15.0。
+3. macOS 打包机使用完整 Xcode 26 或更新版本，以编译明暗外观一致的应用图标；签名与公证环境还需提供 `codesign`、`notarytool` 和 `stapler`。
+4. Windows 构建机允许执行 PowerShell 和 NSIS 打包工具。
+5. 仓库全量测试、类型检查和构建通过。
+6. 打包脚本会删除目标架构旧目录，并要求构建后只找到一个 fresh package root。
+7. Codex Runtime 三个平台清单中的 npm tarball integrity 和逐文件 SHA-256 已固定。
+8. Creator Runtime 的 KrillinAI、ffmpeg、ffprobe 下载地址和 SHA-256 已固定；yt-dlp 在在线打包前解析最新 nightly，并固定本次下载地址和 SHA-256。
+9. OSV Scanner 2.3.8 扫描发布源码无未解释漏洞。
+10. `.github/workflows/desktop-release.yml` 通过 actionlint。
+
+Desktop 使用 `resources/icon.png` 作为各平台统一的应用图标源。macOS 打包时从同一张 PNG 生成白底黑色图形的明暗两种相同外观，编译到 `Assets.car` 并通过 `CFBundleIconName` 引用；Electron Builder 生成的 `icon.icns` 保留为旧版 macOS 的回退资源。包校验会检查 PNG、两种外观的一致性和 App 的图标引用。
+
+## 3. 版本与标签
+
+1. 更新 `apps/desktop/package.json` 的版本。
+2. 确认 GitHub Release 发布权限、签名凭据和目标版本更新元数据流程可用。
+3. 先推送版本提交到 `master`，等待同一提交的 CI 通过，再从 `master` 手动运行 `.github/workflows/desktop-release.yml`，并选择 `target=all`。CI 会把纯发布基础设施改动分流到 release checks；产品改动并行执行 unit、compile 和 Web/Desktop parity。
+4. 完整候选工作流使用 `macos-15-intel`、`macos-15` 和 `windows-latest` 并行构建三个原生目标平台，任一 matrix job 失败会自动取消 sibling jobs。macOS 使用正式 Developer ID 签名和 Apple 公证。完整功能回归在本机对待发布提交完成；远端三个平台统一运行 `e2e:package:smoke`，验证刚生成的真实 App、内嵌 Runtime 和平台能力，不重复 macOS arm64 的完整 packaged App E2E。单平台运行只用于诊断，不能用于正式发布。
+5. 三个平台和 Linux KrillinAI 附件全部成功后，工作流计算排除发布专用文件的应用构建输入 SHA-256，并写入绑定该指纹、Git commit、workflow run 和仓库的候选身份凭据。候选附件保存于该 workflow run，不允许构建后替换。
+6. 候选全绿后才创建并推送 `v<version>` Git tag。标签版本必须与 `apps/desktop/package.json` 完全一致。通常 tag 指向候选 commit；候选后只有发布基础设施变化且应用构建输入 SHA-256 不变时，可以复用原候选。
+7. tag 工作流不再重复构建、签名、公证或 E2E；它按应用构建输入 SHA-256 查找成功的 `target=all` 候选，并确认候选 commit 是 tag commit 的祖先。任何 App、Runtime、依赖或打包输入变化都会产生不同指纹并要求新候选。随后工作流复核 run 与候选身份凭据，下载已验证附件，校验附件白名单并发布 GitHub Release。
+
+发布阶段会按最终候选文件重新计算更新元数据和总校验清单。DMG 写入公证票据后大小和 SHA-512 会改变，不能沿用 Electron Builder 在公证前写入的 DMG 字段；ZIP/EXE 的更新校验必须与原候选完全一致。候选安装包、ZIP、blockmap、Runtime 和组件归档保持原始字节。
+
+如果发布后仅需修复元数据，可在发布基础设施修复通过 master push CI 后运行：
+
+```bash
+gh workflow run desktop-release.yml --ref master -f target=publish -f release_tag=v3.2.7
+```
+
+该入口要求现有 tag 是 master 的祖先，tag 与当前提交的应用构建指纹完全一致，并且两个提交的 CI 均成功。它仍须校验完整候选的来源，逐一确认已发布的程序附件 SHA-256 与候选一致，最终只替换三个 latest YAML 与总校验清单；不会修改 tag 或重新构建、替换安装包。
+
+CI 变更分类始终以最近一次成功的 `master` push CI 为基线，而不是只比较直接父提交。这样，失败的产品提交后即使只修复 workflow，也必须重新执行完整 CI，不会被 release-only 快速路径掩盖。
+如果该基线对象已不在远端历史中，或不再是当前提交的祖先，分类器回退为完整 CI，不阻断分类步骤，也不将未知变更按纯发布改动处理。
+
+候选构建在依赖安装前恢复缓存，并通过 `ELECTRON_CACHE` 让安装脚本复用 Electron 下载；新增 Chromium 下载缓存，工具和 Codex 下载缓存允许按平台与架构回退复用。Codex 归档仍须通过固定 integrity 校验，Creator Runtime 下载保持精确缓存键。Daemon/Web、Creator Runtime 与 Codex Runtime 独立并行准备。Remotion 组件公证与主应用打包并行，但全部成功后才允许生成可交付产物清单；App 和 DMG 的签名、公证、Web 资源哈希及包完整性校验继续执行。上传已压缩的发布附件时关闭 Artifact 二次压缩。
+
+示例：
+
+```bash
+gh workflow run desktop-release.yml --ref master -f target=all
+# 等待候选工作流全部通过后再创建 tag
+git tag -a v3.0.0 -m "OpenCreator v3.0.0"
+git push origin v3.0.0
+```
+
+## 4. macOS 签名与公证
+
+CI secrets：
+
+| Secret | 用途 |
+|---|---|
+| `MACOS_CERTIFICATE` | Developer ID Application 的 `.p12`，支持 base64 或文件形式 |
+| `MACOS_CERTIFICATE_PASSWORD` | `.p12` 密码 |
+| `APPLE_ID` | 公证使用的 Apple ID |
+| `APPLE_APP_SPECIFIC_PASSWORD` | Apple 专用密码 |
+| `APPLE_TEAM_ID` | Apple Developer Team ID |
+
+签名配置位于：
+
+- `apps/desktop/electron-builder.yml`
+- `apps/desktop/resources/entitlements.mac.plist`
+
+未配置证书时，发布脚本会设置 `CSC_IDENTITY_AUTO_DISCOVERY=false` 并关闭 notarize，仍生成 unsigned artifact，用于内部测试，不能作为正式外发包。
+
+正式包验证：
+
+```bash
+codesign --verify --deep --strict --verbose=2 "OpenCreator.app"
+spctl --assess --type execute --verbose=4 "OpenCreator.app"
+xcrun stapler validate "OpenCreator.app"
+```
+
+预期：
+
+1. `codesign` 无错误。
+2. `spctl` 返回 accepted。
+3. `stapler` 返回 validation worked。
+4. 从 DMG 拖入 Applications 后首次启动不提示应用已损坏。
+
+## 5. Windows 签名
+
+CI secrets：
+
+| Secret | 用途 |
+|---|---|
+| `WINDOWS_CERTIFICATE` | Windows 代码签名证书 |
+| `WINDOWS_CERTIFICATE_PASSWORD` | 证书密码 |
+
+发布脚本会将其映射为 Electron Builder 使用的 `CSC_LINK` 和 `CSC_KEY_PASSWORD`。未配置证书时仍生成 unsigned NSIS 安装包。
+
+## 6. 自动更新
+
+正式包更新源固定为 Electron Builder 配置中的 GitHub Releases：
+
+```text
+provider: github
+owner: krillinai
+repo: OpenCreator
+```
+
+生产运行时不依赖 `OPENCREATOR_UPDATE_URL`。测试通过注入 fake updater 隔离，不允许把开发覆盖写入正式包。
+
+GitHub Release 发布 24 个附件，另外 2 个源码归档由 GitHub 自动生成：
+
+1. macOS arm64：`OpenCreator-<version>-mac-arm64.dmg`、对应 ZIP、ZIP blockmap 和 `latest-mac.yml`。
+2. macOS x64：`OpenCreator-<version>-mac-x64.dmg`、对应 ZIP、ZIP blockmap 和 `latest-x64-mac.yml`。
+3. Windows x64：`OpenCreator-<version>-win-x64.exe` 和 `latest.yml`。
+4. KrillinAI Server：macOS arm64、macOS x64、Windows x64、Linux x64 和 Linux arm64 共 5 个独立程序包。
+5. KrillinAI CLI：macOS arm64、macOS x64、Windows x64、Linux x64 和 Linux arm64 共 5 个独立程序包。
+6. macOS arm64、macOS x64 和 Windows x64 三个独立 Remotion 组件归档。
+7. 一份 `SHA256SUMS.txt`，覆盖以上 23 个文件。
+
+安装包、更新文件的文件名、版本和 SHA512 保持 Electron Builder 原始输出，不在构建后重命名。macOS 更新使用 ZIP，其 DMG blockmap 不进入发布附件；Windows 当前关闭差分包，不生成独立 blockmap。
+
+打包脚本按本次构建清单检查文件哈希，仅将白名单附件整理到 `apps/desktop/release/publish/<platform>-<arch>/`，该目录还包含本平台校验清单。发布任务合并平台附件后重新生成总校验清单；任何缺失或额外附件都会阻止发布。
+
+Desktop 构建清单、builder 调试配置和 E2E 报告仅保留在 `desktop-build-diagnostics-*` CI Artifact，保存 14 天。KrillinAI Server 和 CLI 分别封装为独立发布包，不合并为工具集；Windows 未签名说明放在 Release 正文，不再生成独立 TXT 附件。
+
+客户端行为：
+
+1. 每次启动和每 6 小时检查一次。
+2. 发现更新后由用户确认下载。
+3. 下载完成后由用户确认退出安装。
+4. 不静默终止正在运行的任务。
+5. 安装前停止通知、flush 窗口状态和日志，再停止 Daemon。
+6. 安装准备或 `quitAndInstall()` 失败时恢复当前 Runtime 和通知能力。
+7. 更新失败不影响当前版本继续运行。
+
+## 7. 发布验证
+
+```bash
+pnpm test
+pnpm typecheck
+pnpm build
+OPENCREATOR_DESKTOP_OFFLINE=1 \
+  CSC_IDENTITY_AUTO_DISCOVERY=false \
+  pnpm desktop:package
+pnpm --filter @opencreator/desktop verify:package
+pnpm --filter @opencreator/desktop e2e:package
+OPENCREATOR_RUN_REAL_CODEX_SMOKE=1 pnpm --filter @opencreator/desktop e2e:real-codex
+```
+
+`verify:package` 会检查：
+
+1. Desktop Main、Preload、Bootstrap 和共享运行时代码完整。
+2. Web 静态资源完整。
+3. Daemon 生产依赖完整。
+4. 不包含 `.runtime`、源码映射、测试和旧打包目录。
+5. `better_sqlite3.node` 存在。
+6. RunAsNode、NODE_OPTIONS 和 Node CLI Inspector 已关闭。
+7. Cookie 加密、ASAR 完整性和 OnlyLoadAppFromAsar 已启用。
+8. macOS 代码签名结构和 `ElectronAsarIntegrity` 元数据有效。
+9. Codex Runtime 与 Creator Runtime 的平台、架构、文件列表和 SHA-256 与固定清单一致。
+10. Creator Runtime 不包含 Whisper 可执行文件或模型。
+
+原生 SQLite 的真实加载、Runtime JSON/二进制/SSE、Daemon 恢复和进程回收由 packaged E2E 验证。启用 RunAsNode Fuse 后，不再使用正式可执行文件的 `-e` 模式执行 Node 烟测。
+
+打包脚本会生成：
+
+```text
+apps/desktop/release/opencreator-desktop-build-manifest.json
+```
+
+`verify:package` 和 `e2e:package` 默认读取同一构建清单。CI 中打包脚本还会把 `OPENCREATOR_DESKTOP_PACKAGE_ROOT` 写入 `GITHUB_ENV`，禁止从多个旧目录中猜测产物。
+
+### 7.1 依赖安全扫描
+
+CI 使用：
+
+```text
+google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v2.3.8
+```
+
+本地扫描应在干净 checkout 中执行：
+
+```bash
+osv-scanner scan source --recursive .
+```
+
+如果当前工作目录包含被 Git 忽略的参考仓库或样例项目，应先基于以下文件集生成临时发布源码快照，再扫描快照：
+
+```bash
+git ls-files --cached --others --exclude-standard
+```
+
+不得把本机忽略目录中的结果误记为 OpenCreator 发布依赖，也不得因扫描器下载、网络或 OSV 服务失败而记为 `PASS`。
+
+### 7.2 Runtime 代理验收
+
+Electron Main 使用 Node 24 标准 `fetch` 转发到固定 `127.0.0.1:<port>`，并设置 `redirect: 'manual'`。选择标准 `fetch` 是因为 Electron `net.fetch` 在 `protocol.handle` 内出现过无法稳定收敛的挂起；Token 仍只在 Main 完成最终同源校验后注入。
+
+## 8. 发布后检查
+
+1. 冷启动先显示 Codex 检测页。
+2. 真实 hello Probe 成功后进入 Dashboard 。
+3. 连续刷新五次不重复 Probe。
+4. 关闭窗口后应用进入托盘，任务继续。
+5. `opencreator://tasks` 和 `opencreator://thread/<id>` 聚焦现有实例。
+6. 系统通知点击进入正确任务。
+7. 真正退出后无 Daemon 或 Codex 子进程残留。
+8. 日志和诊断文件中没有 token。
+9. 更新检查直接使用 GitHub Releases，不依赖 `OPENCREATOR_UPDATE_URL`。
+10. 构建清单中的 package root 与 verify、E2E 使用的产物一致。
+
+## 9. 回滚
+
+1. 停止分发有问题的更新元数据。
+2. 恢复上一版本安装包、YAML 和 blockmap。
+3. 不删除用户 `userData`。
+4. 不降级或覆盖用户 `CODEX_HOME`。
+5. 若数据库 schema 不支持降级，保留当前数据目录备份并发布前向修复版本。
+
+环境缺失导致无法完成的签名、公证、干净机、Windows 和真实升级验证，必须在最终验收报告中标记为 `BLOCKED_ENV` 或 `NOT_RUN`，不能记为 `PASS`。

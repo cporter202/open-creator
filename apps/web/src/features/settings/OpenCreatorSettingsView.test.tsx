@@ -1,0 +1,639 @@
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { userEvent } from '@testing-library/user-event';
+import { describe, expect, it, vi } from 'vitest';
+import { ConfirmDialogProvider } from '../../components/dialogs/ConfirmDialogProvider.js';
+import { LanguageProvider } from '../../i18n/LanguageProvider.js';
+import { languagePreferenceStorageKey } from '../../i18n/language.js';
+import { OpenCreatorSettingsView } from './OpenCreatorSettingsView.js';
+import type { GatewayAccountState } from '@opencreator/protocol';
+import type { GatewayAccountSettingsService } from '../../services/gateway-account-service.js';
+import { createGatewayAccountService } from '../../services/gateway-account-service.js';
+import type { CreatorServicesSettingsService } from '../../services/creator-services-service.js';
+import { ApiClientError } from '../../runtime/errors.js';
+
+const runtimeStatus = {
+  connected: true,
+  appVersion: '3.2.1',
+  runtimeVersion: '0.9.1',
+  codexVersion: 'codex-cli 1.2.3',
+  codexPath: '/opt/homebrew/bin/codex',
+  codexHome: '/Users/wulien/.codex',
+  lastCheckedAt: '2026-07-07 10:00'
+};
+
+describe('OpenCreatorSettingsView', () => {
+  it('shows connection diagnostics and reconnects official services without a model probe', async () => {
+    const blocked: GatewayAccountState = { source: 'gateway', authState: 'signed_in', activationState: 'blocked', account: { id: 'a', email: 'a@test', verified: true }, bindingVersion: null,
+      models: [{ id: 'vendor/text', modality: 'text', capabilities: ['responses'] }], activationError: { code: 'gateway_unavailable', message: 'Unavailable', stage: 'usage', request: { path: '/api/v1/client/usage', reason: 'http', httpStatus: 503 } } };
+    const ready: GatewayAccountState = { ...blocked, activationState: 'ready', bindingVersion: 'a:1', activationError: null };
+    const client = { get: vi.fn(), post: vi.fn().mockResolvedValue(ready), patch: vi.fn() };
+    const changed = vi.fn();
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} gatewayAccountService={createGatewayAccountService(client)} gatewayAccountState={blocked} onGatewayStateChange={changed} initialTab="ai-services" onBack={vi.fn()} />);
+    expect(screen.getByRole('alert')).toHaveTextContent('同步设备状态');
+    expect(screen.getByRole('alert')).toHaveTextContent('/api/v1/client/usage');
+    expect(screen.getByRole('alert')).toHaveTextContent('HTTP 503');
+    expect(screen.getByRole('combobox', { name: '文本模型' })).toBeDisabled();
+    await userEvent.setup().click(screen.getByRole('button', { name: '重新连接' }));
+    await waitFor(() => expect(changed).toHaveBeenCalledWith(ready));
+    expect(client.post).toHaveBeenCalledExactlyOnceWith('/gateway/auth/activate', {});
+    expect(client.patch).not.toHaveBeenCalled();
+    expect(screen.getByRole('combobox', { name: '文本模型' })).toBeEnabled();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+  it('keeps the general proxy editable while signed in without reading custom credentials', async () => {
+    const state: GatewayAccountState = { source: 'gateway', authState: 'signed_in', activationState: 'ready', account: { id: 'a', email: 'a@test', verified: true }, bindingVersion: '1', models: [], activationError: null };
+    const getConfig = vi.fn(); const saveNetwork = vi.fn(async (value: { proxy: string }) => value);
+    const creatorServicesService = { getNetwork: vi.fn(async () => ({ proxy: 'http://127.0.0.1:7897' })), saveNetwork, getConfig } as unknown as CreatorServicesSettingsService;
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} gatewayAccountState={state} creatorServicesService={creatorServicesService} onBack={vi.fn()} />);
+    const user = userEvent.setup(); const input = await screen.findByDisplayValue('http://127.0.0.1:7897');
+    await user.clear(input); await user.type(input, 'http://127.0.0.1:8888');
+    await user.click(screen.getByRole('button', { name: '保存网络代理' }));
+    expect(saveNetwork).toHaveBeenCalledWith({ proxy: 'http://127.0.0.1:8888' });
+    expect(getConfig).not.toHaveBeenCalled();
+  });
+  it('shows only official model controls and changes the model without exposing connection settings', async () => {
+    const state: GatewayAccountState = { source: 'gateway', authState: 'signed_in', activationState: 'ready', account: { id: 'a', email: 'a@test', verified: true }, bindingVersion: 'a:1', models: [{ id: 'vendor/first', modality: 'text', capabilities: ['responses'] }, { id: 'vendor/second', modality: 'text', capabilities: ['responses'] }], selectedModels: { text: 'vendor/first' }, activationError: null };
+    const next = { ...state, selectedModels: { text: 'vendor/second' } };
+    const client = { get: vi.fn(), post: vi.fn(), patch: vi.fn().mockResolvedValue(next) };
+    const service = createGatewayAccountService(client);
+    const changed = vi.fn();
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} gatewayAccountService={service} gatewayAccountState={state} onGatewayStateChange={changed} initialTab="ai-services" onBack={vi.fn()} />);
+    expect(screen.getByRole('combobox', { name: '文本模型' })).toHaveValue('first');
+    expect(screen.queryByText(/OpenRouter|base_url|api_key|Base URL|API Key/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: '模型服务' })).not.toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('combobox', { name: '文本模型' }));
+    await user.click(screen.getByRole('option', { name: 'second' }));
+    await waitFor(() => expect(changed).toHaveBeenCalledWith(next));
+    expect(client.patch).toHaveBeenCalledWith('/gateway/model', { modality: 'text', model: 'vendor/second' });
+  });
+  it.each(['ready', 'inactive'] as const)('disables official models on session expiry with %s activation and recovers after sign-in', async activationState => {
+    const state: GatewayAccountState = { source: 'gateway', authState: 'signed_in', activationState: 'ready', account: { id: 'a', email: 'a@test', verified: true }, bindingVersion: 'a:1',
+      models: [{ id: 'vendor/first', modality: 'text', capabilities: ['responses'] }, { id: 'vendor/second', modality: 'text', capabilities: ['responses'] }], selectedModels: { text: 'vendor/second' }, activationError: null };
+    const expired = { ...state, authState: 'expired' as const, activationState };
+    const client = { get: vi.fn(), post: vi.fn(), patch: vi.fn() };
+    const service = createGatewayAccountService(client);
+    const onOpenPersonalCenter = vi.fn();
+    const props = { runtimeStatus, gatewayAccountService: service, initialTab: 'ai-services' as const, onOpenPersonalCenter, onBack: vi.fn() };
+    const view = render(<OpenCreatorSettingsView {...props} gatewayAccountState={state}/>);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('combobox', { name: '文本模型' }));
+    expect(screen.getByRole('listbox', { name: '文本模型' })).toBeInTheDocument();
+    view.rerender(<OpenCreatorSettingsView {...props} gatewayAccountState={expired}/>);
+    expect(await screen.findByText('登录已过期')).toBeInTheDocument();
+    expect(screen.queryByText('已连接')).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).not.toHaveClass('is-ready');
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    for (const model of screen.getAllByRole('combobox')) expect(model).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: '文本模型' })).toHaveValue('second');
+    await user.click(screen.getByRole('button', { name: '重新登录' }));
+    expect(onOpenPersonalCenter).toHaveBeenCalledOnce();
+    expect(client.patch).not.toHaveBeenCalled();
+    view.rerender(<OpenCreatorSettingsView {...props} gatewayAccountState={state}/>);
+    expect(await screen.findByText('已连接')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: '文本模型' })).toBeEnabled();
+    expect(screen.getByRole('combobox', { name: '文本模型' })).toHaveValue('second');
+  });
+  it('refreshes account state when a model change discovers an expired session', async () => {
+    const state: GatewayAccountState = { source: 'gateway', authState: 'signed_in', activationState: 'ready', account: { id: 'a', email: 'a@test', verified: true }, bindingVersion: 'a:1',
+      models: [{ id: 'vendor/first', modality: 'text', capabilities: ['responses'] }, { id: 'vendor/second', modality: 'text', capabilities: ['responses'] }], selectedModels: { text: 'vendor/first' }, activationError: null };
+    const expired = { ...state, authState: 'expired' as const, activationState: 'inactive' as const };
+    const client = { get: vi.fn().mockResolvedValue(expired), post: vi.fn(), patch: vi.fn().mockRejectedValue(new ApiClientError({ status: 401, code: 'GATEWAY_AUTH_REQUIRED', message: 'Sign in again' })) };
+    const service = createGatewayAccountService(client);
+    const changed = vi.fn();
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} gatewayAccountService={service} gatewayAccountState={state} onGatewayStateChange={changed} initialTab="ai-services" onBack={vi.fn()}/>);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('combobox', { name: '文本模型' }));
+    await user.click(screen.getByRole('option', { name: 'second' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('登录已过期，请重新登录');
+    expect(screen.queryByText(/请等待当前任务结束/)).not.toBeInTheDocument();
+    await waitFor(() => expect(changed).toHaveBeenCalledWith(expired));
+    expect(client.get).toHaveBeenCalledWith('/gateway/account');
+    expect(screen.getByRole('combobox', { name: '文本模型' })).toBeDisabled();
+  });
+  it.each([
+    ['invalid_model', '该模型已不可用，请刷新模型列表后重试'],
+    ['services_not_ready', '模型服务暂不可用，请重新连接后重试'],
+    ['gateway_unavailable', '模型切换失败，请重试']
+  ])('shows the actual model switch failure for %s without claiming a task is active', async (gatewayCode, message) => {
+    const state: GatewayAccountState = { source: 'gateway', authState: 'signed_in', activationState: 'ready', account: { id: 'a', email: 'a@test', verified: true }, bindingVersion: 'a:1',
+      models: [{ id: 'vendor/first', modality: 'text', capabilities: ['responses'] }, { id: 'vendor/second', modality: 'text', capabilities: ['responses'] }], selectedModels: { text: 'vendor/first' }, activationError: null };
+    const client = { get: vi.fn().mockResolvedValue(state), post: vi.fn(), patch: vi.fn().mockRejectedValue(new ApiClientError({ status: 400, code: 'GATEWAY_UNAVAILABLE', message: 'Switch failed', details: { gatewayCode } })) };
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} gatewayAccountService={createGatewayAccountService(client)} gatewayAccountState={state} initialTab="ai-services" onBack={vi.fn()}/>);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('combobox', { name: '文本模型' }));
+    await user.click(screen.getByRole('option', { name: 'second' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(message);
+    expect(screen.queryByText(/请等待当前任务结束/)).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '文本模型' })).toBeEnabled());
+    expect(screen.getByRole('combobox', { name: '文本模型' })).toHaveValue('first');
+  });
+  it('shows custom settings for guests and directs sign-in to the personal center', async () => {
+    const gateway: GatewayAccountState = { source: 'manual', authState: 'signed_out', activationState: 'inactive', account: null, bindingVersion: null, models: [], activationError: null };
+    const service: GatewayAccountSettingsService = { getState: vi.fn(async () => gateway), setSource: vi.fn(), selectModel: vi.fn(), start: vi.fn(), cancel: vi.fn(), logout: vi.fn(), activate: vi.fn(), getBalance: vi.fn(), getSummary: vi.fn(), getPlans: vi.fn(), getOrders: vi.fn(), getOrder: vi.fn(), getCreditGrants: vi.fn(), checkout: vi.fn(), portal: vi.fn() };
+    const onOpenPersonalCenter = vi.fn();
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} gatewayAccountService={service} gatewayAccountState={gateway} initialTab="ai-services" onOpenPersonalCenter={onOpenPersonalCenter} onBack={vi.fn()}/>);
+    expect(await screen.findByText('自定义配置')).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole('button', { name: '登录 OpenCreator' }));
+    expect(onOpenPersonalCenter).toHaveBeenCalledOnce();
+    expect(service.setSource).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: '官方服务' })).not.toBeInTheDocument();
+  });
+  it('keeps signed-in accounts in official settings and restores custom settings after sign-out', async () => {
+    const gateway: GatewayAccountState = { source: 'gateway', authState: 'signed_in', activationState: 'ready', account: { id: 'a', email: 'a@example.test', verified: true }, bindingVersion: null, models: [], activationError: null };
+    const local = { ...gateway, source: 'manual' as const, authState: 'signed_out' as const, activationState: 'inactive' as const, account: null };
+    const service: GatewayAccountSettingsService = { getState: vi.fn(async () => gateway), setSource: vi.fn(async () => local), selectModel: vi.fn(), start: vi.fn(), cancel: vi.fn(), logout: vi.fn(), activate: vi.fn(), getBalance: vi.fn(), getSummary: vi.fn(), getPlans: vi.fn(), getOrders: vi.fn(), getOrder: vi.fn(), getCreditGrants: vi.fn(), checkout: vi.fn(), portal: vi.fn() };
+    const onGatewayStateChange = vi.fn();
+    const view = render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} gatewayAccountService={service} gatewayAccountState={gateway} initialTab="ai-services" onGatewayStateChange={onGatewayStateChange} onBack={vi.fn()}/>);
+    expect(await screen.findByText('官方服务')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '自定义配置' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: '模型服务' })).not.toBeInTheDocument();
+    expect(service.setSource).not.toHaveBeenCalled();
+    view.rerender(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} gatewayAccountService={service} gatewayAccountState={local} initialTab="ai-services" onBack={vi.fn()}/>);
+    expect(await screen.findByRole('tab', { name: '模型服务' })).toBeInTheDocument();
+  });
+  it('keeps account and subscription management out of settings', () => {
+    render(<OpenCreatorSettingsView runtimeStatus={{ connected: false }} onBack={vi.fn()}/>);
+    expect(screen.queryByRole('button', { name: '账户' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '订阅与积分' })).not.toBeInTheDocument();
+  });
+  it('renders default navigation and general settings without old work mode copy', () => {
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} />);
+
+    expect(screen.getByRole('button', { name: '返回应用' })).toBeInTheDocument();
+    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
+    expect(screen.queryByText('搜索设置')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '常规' })).toHaveAttribute('aria-current', 'page');
+    const aiServices = screen.getByRole('button', { name: 'AI 服务 必需' });
+    expect(aiServices).toBeInTheDocument();
+    expect(within(aiServices).getByText('必需')).toHaveClass('settings-nav-required');
+    expect(screen.queryByRole('button', { name: 'Codex Agent' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '插件' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'MCP 服务' }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Profiles' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '清理' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '诊断' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '关于 OpenCreator' })).toBeInTheDocument();
+
+    expect(screen.getByText('默认权限')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: '默认权限' })).toHaveValue('follow-project');
+    expect(screen.getByText('默认文件打开方式')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: '显示语言' })).toHaveValue('system');
+    expect(screen.getByRole('option', { name: '跟随系统（简体中文）' })).toBeInTheDocument();
+    expect(screen.getByText('菜单栏显示')).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: '动态背景' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: /发送匿名使用数据/ })).not.toBeInTheDocument();
+    expect(screen.queryByText('工作模式')).not.toBeInTheDocument();
+    expect(screen.queryByText('适用于编程')).not.toBeInTheDocument();
+  });
+
+  it('switches the display language immediately and persists the choice', () => {
+    render(
+      <LanguageProvider initialPreference="zh-CN">
+        <OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} />
+      </LanguageProvider>
+    );
+
+    fireEvent.change(screen.getByRole('combobox', { name: '显示语言' }), {
+      target: { value: 'en-US' }
+    });
+
+    expect(screen.getByRole('heading', { name: 'General' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Display language' })).toHaveValue('en-US');
+    expect(screen.getByRole('button', { name: 'Back to app' })).toBeInTheDocument();
+    expect(window.localStorage.getItem(languagePreferenceStorageKey)).toBe('en-US');
+    expect(document.documentElement).toHaveAttribute('lang', 'en-US');
+
+    window.localStorage.removeItem(languagePreferenceStorageKey);
+  });
+
+  it.each([
+    ['ja-JP', '一般'], ['ko-KR', '일반'], ['es-ES', 'General'],
+    ['fr-FR', 'Général'], ['de-DE', 'Allgemein'], ['pt-BR', 'Geral']
+  ] as const)('offers and immediately switches to %s', (language, heading) => {
+    render(<LanguageProvider initialPreference="en-US"><OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} /></LanguageProvider>);
+    const select = screen.getByRole('combobox', { name: 'Display language' });
+    expect(select.querySelectorAll('option')).toHaveLength(10);
+    fireEvent.change(select, { target: { value: language } });
+    expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument();
+    expect(select).toHaveValue(language);
+    expect(window.localStorage.getItem(languagePreferenceStorageKey)).toBe(language);
+    expect(document.documentElement.lang).toBe(language);
+    window.localStorage.removeItem(languagePreferenceStorageKey);
+  });
+
+  it('opens AI services on demand and can return to general settings', async () => {
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} />);
+
+    expect(screen.queryByRole('heading', { name: 'AI 服务' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'AI 服务 必需' }));
+    expect(await screen.findByRole('heading', { name: 'AI 服务' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '模型服务' })).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: '常规' }));
+    expect(screen.getByRole('combobox', { name: '默认权限' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'AI 服务' })).not.toBeInTheDocument();
+  });
+
+  it('preserves the requested AI service section when opened directly', async () => {
+    render(
+      <OpenCreatorSettingsView
+        runtimeStatus={runtimeStatus}
+        initialTab="ai-services"
+        initialSection="transcription"
+        onBack={vi.fn()}
+      />
+    );
+
+    expect(await screen.findByRole('tab', { name: '语音识别' }))
+      .toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('button', { name: 'AI 服务 必需' }))
+      .toHaveAttribute('aria-current', 'page');
+  });
+
+  it('notifies when the global default permission changes', async () => {
+    const user = userEvent.setup();
+    const onDefaultPermissionChange = vi.fn();
+    render(
+      <ConfirmDialogProvider>
+        <OpenCreatorSettingsView
+          runtimeStatus={runtimeStatus}
+          defaultPermission="workspace-write"
+          onDefaultPermissionChange={onDefaultPermissionChange}
+          onBack={vi.fn()}
+        />
+      </ConfirmDialogProvider>
+    );
+
+    const permission = screen.getByRole('combobox', { name: '默认权限' });
+    expect(permission).toHaveValue('workspace-write');
+
+    fireEvent.change(permission, { target: { value: 'danger-full-access' } });
+    await user.click(await screen.findByRole('button', { name: '开启' }));
+
+    await waitFor(() => {
+      expect(onDefaultPermissionChange).toHaveBeenCalledWith('danger-full-access');
+    });
+  });
+
+  it('keeps the existing permission when full access confirmation is canceled', async () => {
+    const user = userEvent.setup();
+    const onDefaultPermissionChange = vi.fn();
+    render(
+      <ConfirmDialogProvider>
+        <OpenCreatorSettingsView
+          runtimeStatus={runtimeStatus}
+          defaultPermission="workspace-write"
+          onDefaultPermissionChange={onDefaultPermissionChange}
+          onBack={vi.fn()}
+        />
+      </ConfirmDialogProvider>
+    );
+
+    const permission = screen.getByRole('combobox', { name: '默认权限' });
+    expect(within(permission).getAllByRole('option').map(option => option.textContent))
+      .toEqual(['跟随项目设置', '请求批准', '完全访问权限']);
+
+    fireEvent.change(permission, { target: { value: 'danger-full-access' } });
+    await user.click(await screen.findByRole('button', { name: '取消' }));
+
+    expect(onDefaultPermissionChange).not.toHaveBeenCalled();
+  });
+
+  it('renders a two-option color mode control and notifies when it changes', () => {
+    const onColorModeChange = vi.fn();
+    render(
+      <OpenCreatorSettingsView
+        runtimeStatus={runtimeStatus}
+        colorMode="dark"
+        onColorModeChange={onColorModeChange}
+        onBack={vi.fn()}
+      />
+    );
+
+    const modeControl = screen.getByRole('group', { name: '颜色模式' });
+    expect(within(modeControl).getByRole('button', { name: '浅色' })).toHaveAttribute(
+      'aria-pressed',
+      'false'
+    );
+    expect(within(modeControl).getByRole('button', { name: '深色' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+
+    fireEvent.click(within(modeControl).getByRole('button', { name: '浅色' }));
+    expect(onColorModeChange).toHaveBeenCalledWith('light');
+  });
+
+  it('renders seven accent color swatches and notifies when the selection changes', () => {
+    const onAccentColorChange = vi.fn();
+    render(
+      <OpenCreatorSettingsView
+        runtimeStatus={runtimeStatus}
+        accentColor="neutral"
+        onAccentColorChange={onAccentColorChange}
+        onBack={vi.fn()}
+      />
+    );
+
+    const accentControl = screen.getByRole('radiogroup', { name: '重点色' });
+    expect(within(accentControl).getAllByRole('radio')).toHaveLength(7);
+    expect(within(accentControl).getByRole('radio', { name: '默认灰' }))
+      .toHaveAttribute('aria-checked', 'true');
+    const customAccent = within(accentControl).getByRole('radio', { name: '自定义' });
+    expect(customAccent).toHaveTextContent('自定义');
+    expect(customAccent.querySelector('.settings-accent-swatch')).toBeInTheDocument();
+    expect(customAccent.firstElementChild).toHaveClass('settings-accent-swatch');
+    expect(customAccent.lastElementChild).toHaveClass('settings-custom-accent-text');
+    expect(customAccent.querySelector('svg')).not.toBeInTheDocument();
+    expect(customAccent).toHaveStyle({ '--settings-accent-swatch': '#3b82f6' });
+    expect(screen.getByText('｜')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: '自定义重点色色值' })).toHaveValue('#3b82f6');
+
+    fireEvent.click(within(accentControl).getByRole('radio', { name: '橙色' }));
+    expect(onAccentColorChange).toHaveBeenCalledWith('orange');
+  });
+
+  it('validates and applies a custom accent color without blocking draft input', () => {
+    const onCustomAccentColorChange = vi.fn();
+    render(
+      <OpenCreatorSettingsView
+        runtimeStatus={runtimeStatus}
+        accentColor="custom"
+        customAccentColor="#3b82f6"
+        onCustomAccentColorChange={onCustomAccentColorChange}
+        onBack={vi.fn()}
+      />
+    );
+
+    const input = screen.getByRole('textbox', { name: '自定义重点色色值' });
+    expect(input).toHaveValue('#3b82f6');
+
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: '#0af' } });
+    expect(onCustomAccentColorChange).toHaveBeenLastCalledWith('#00aaff');
+    expect(input).toHaveValue('#0af');
+
+    fireEvent.change(input, { target: { value: '#12' } });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(screen.getByRole('alert')).toHaveTextContent('请输入 3 位或 6 位十六进制色值');
+
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(input).toHaveValue('#3b82f6');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('updates the desktop close behavior when Desktop preferences are available', () => {
+    const onDesktopCloseBehaviorChange = vi.fn();
+    render(
+      <OpenCreatorSettingsView
+        runtimeStatus={runtimeStatus}
+        desktopCloseBehavior="hide"
+        onDesktopCloseBehaviorChange={onDesktopCloseBehaviorChange}
+        onBack={vi.fn()}
+      />
+    );
+
+    const behavior = screen.getByRole('combobox', { name: '关闭窗口时' });
+    expect(behavior).toHaveValue('hide');
+    fireEvent.change(behavior, { target: { value: 'quit' } });
+    expect(onDesktopCloseBehaviorChange).toHaveBeenCalledWith('quit');
+  });
+
+  it('shows storage paths and updates a selected completed output location', async () => {
+    const user = userEvent.setup();
+    const updateStorageSettings = vi.fn(async () => ({
+      configured: true,
+      settings: {
+        defaultProjectRoot: '/Users/demo/Projects',
+        outputRoot: '/Users/demo/Exports'
+      }
+    }));
+    const onSelectStorageDirectory = vi.fn(async () => '/Users/demo/Exports');
+    render(
+      <OpenCreatorSettingsView
+        runtimeStatus={runtimeStatus}
+        storageSettingsService={{
+          getStorageSettings: async () => ({
+            configured: false,
+            settings: {
+              defaultProjectRoot: '/Users/demo/Documents/OpenCreator',
+              outputRoot: '/Users/demo/Documents/OpenCreator/Exports'
+            }
+          }),
+          updateStorageSettings
+        }}
+        onSelectStorageDirectory={onSelectStorageDirectory}
+        onBack={vi.fn()}
+      />
+    );
+
+    expect(await screen.findByRole('textbox', { name: '默认项目位置' }))
+      .toHaveValue('/Users/demo/Documents/OpenCreator');
+    await user.click(screen.getByRole('button', { name: 'Select 完成产物位置' }));
+    expect(onSelectStorageDirectory).toHaveBeenCalledWith('output-root');
+    expect(updateStorageSettings).toHaveBeenCalledWith({
+      outputRoot: '/Users/demo/Exports'
+    });
+    expect(screen.getByRole('textbox', { name: '完成产物位置' }))
+      .toHaveValue('/Users/demo/Exports');
+  });
+
+  it('allows Browser users to enter and save an absolute storage path', async () => {
+    const user = userEvent.setup();
+    const updateStorageSettings = vi.fn(async (update: { outputRoot?: string }) => ({
+      configured: true,
+      settings: {
+        defaultProjectRoot: '/Users/demo/Documents/OpenCreator',
+        outputRoot: update.outputRoot ?? '/Users/demo/Documents/OpenCreator/Exports'
+      }
+    }));
+    render(
+      <OpenCreatorSettingsView
+        runtimeStatus={runtimeStatus}
+        storageSettingsService={{
+          getStorageSettings: async () => ({
+            configured: false,
+            settings: {
+              defaultProjectRoot: '/Users/demo/Documents/OpenCreator',
+              outputRoot: '/Users/demo/Documents/OpenCreator/Exports'
+            }
+          }),
+          updateStorageSettings
+        }}
+        onBack={vi.fn()}
+      />
+    );
+
+    const output = await screen.findByRole('textbox', { name: '完成产物位置' });
+    await user.clear(output);
+    await user.type(output, '/Users/demo/Custom Exports');
+    await user.click(screen.getByRole('button', { name: 'Save 完成产物位置' }));
+
+    expect(updateStorageSettings).toHaveBeenCalledWith({
+      outputRoot: '/Users/demo/Custom Exports'
+    });
+    expect(output).toHaveValue('/Users/demo/Custom Exports');
+    expect(screen.queryByRole('button', { name: 'Select 完成产物位置' })).not.toBeInTheDocument();
+  });
+
+  it('shows the anonymous telemetry scope and allows Desktop users to disable it', () => {
+    const onDesktopTelemetryEnabledChange = vi.fn();
+    render(
+      <OpenCreatorSettingsView
+        runtimeStatus={runtimeStatus}
+        desktopCloseBehavior="hide"
+        desktopTelemetryEnabled
+        onDesktopTelemetryEnabledChange={onDesktopTelemetryEnabledChange}
+        onBack={vi.fn()}
+      />
+    );
+
+    const telemetry = screen.getByRole('switch', { name: /发送匿名使用数据/ });
+    expect(telemetry).toBeChecked();
+    fireEvent.click(telemetry);
+    expect(onDesktopTelemetryEnabledChange).toHaveBeenCalledWith(false);
+    expect(screen.getByText(/不包含项目、文件或对话内容/)).toBeInTheDocument();
+  });
+
+  it('does not show Codex CLI version on the initial general tab', () => {
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} />);
+
+    expect(screen.queryByText('Codex CLI 版本')).not.toBeInTheDocument();
+    expect(screen.queryByText(runtimeStatus.codexVersion)).not.toBeInTheDocument();
+  });
+
+  it('shows local skills and MCP status on the plugins tab', () => {
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '插件' }));
+
+    expect(screen.getByRole('button', { name: '插件' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByText('技能状态')).toBeInTheDocument();
+    expect(screen.getByText('MCP 服务状态')).toBeInTheDocument();
+    expect(screen.getByText('最近检测时间')).toBeInTheDocument();
+    expect(screen.getByText(runtimeStatus.lastCheckedAt)).toBeInTheDocument();
+    expect(screen.getByText('本地能力已就绪')).toBeInTheDocument();
+  });
+
+  it('opens third-party components directly and marks an available yt-dlp update', async () => {
+    const ytDlpStatus = {
+      channel: 'nightly' as const,
+      source: 'bundled' as const,
+      currentVersion: '2026.08.29.232711',
+      bundledVersion: '2026.08.29.232711',
+      latestVersion: '2026.08.31.120000',
+      updateAvailable: true,
+      checkDue: false,
+      lastCheckedAt: '2026-08-31T00:00:00.000Z',
+      lastCheckAttemptAt: '2026-08-31T00:00:00.000Z',
+      installedAt: null
+    };
+    render(
+      <LanguageProvider initialPreference="zh-CN">
+        <OpenCreatorSettingsView
+          runtimeStatus={runtimeStatus}
+          initialTab="local-components"
+          runtimeDependencies={{
+            ytDlpStatus,
+            phase: 'idle',
+            checkYtDlpUpdate: vi.fn(async () => ytDlpStatus),
+            updateYtDlp: vi.fn()
+          }}
+          onBack={vi.fn()}
+        />
+      </LanguageProvider>
+    );
+
+    const thirdPartyComponents = screen.getByRole('button', { name: /第三方组件/ });
+    expect(thirdPartyComponents).toHaveAttribute('aria-current', 'page');
+    expect(within(thirdPartyComponents).getByLabelText('有可用更新').parentElement)
+      .toHaveClass('settings-nav-label');
+    expect(screen.getByRole('heading', { name: 'yt-dlp nightly' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByLabelText('有可用更新')).not.toHaveLength(0));
+  });
+
+  it('shows Codex CLI details only in the about advanced information section', () => {
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '关于 OpenCreator' }));
+
+    expect(screen.getByText('OpenCreator 版本')).toBeInTheDocument();
+    expect(screen.getByText(runtimeStatus.appVersion)).toBeInTheDocument();
+    expect(screen.getByText('Runtime 版本')).toBeInTheDocument();
+    expect(screen.getByText('数据目录')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '检查更新' })).not.toBeInTheDocument();
+    expect(screen.getByText('检查更新')).toBeInTheDocument();
+    expect(screen.getByText('手动检查稍后支持')).toBeInTheDocument();
+
+    const advanced = screen.getByRole('region', { name: '高级信息' });
+    expect(within(advanced).getByText('Codex CLI 版本')).toBeInTheDocument();
+    expect(within(advanced).getByText(runtimeStatus.codexVersion)).toBeInTheDocument();
+    expect(within(advanced).getByText('Codex CLI 路径')).toBeInTheDocument();
+    expect(within(advanced).getByText(runtimeStatus.codexPath)).toBeInTheDocument();
+    expect(within(advanced).getByText('CODEX_HOME')).toBeInTheDocument();
+    expect(within(advanced).getByText(runtimeStatus.codexHome)).toBeInTheDocument();
+    expect(within(advanced).getByText('本地运行内核状态')).toBeInTheDocument();
+    expect(within(advanced).getByText('正常')).toBeInTheDocument();
+    expect(within(advanced).getByText('最近一次检测时间')).toBeInTheDocument();
+    expect(within(advanced).getByText(runtimeStatus.lastCheckedAt)).toBeInTheDocument();
+  });
+
+  it('keeps MCP management out of settings and opens Profiles', () => {
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={vi.fn()} />);
+
+    expect(screen.queryByRole('button', { name: 'MCP 服务' }))
+      .not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Profiles' }));
+    expect(screen.getByRole('heading', { name: 'Profiles' })).toBeInTheDocument();
+    expect(screen.getByText('本地服务连接后可以管理 Profile。')).toBeInTheDocument();
+  });
+
+  it('opens Cleanup and Diagnostics pages from settings navigation', () => {
+    render(
+      <OpenCreatorSettingsView
+        runtimeStatus={runtimeStatus}
+        codexStatus={{
+          codexBin: runtimeStatus.codexPath,
+          codexVersion: runtimeStatus.codexVersion,
+          codexHome: runtimeStatus.codexHome,
+          codexHomeMode: 'global',
+          codexHomeSource: 'default',
+          codexHomeWritable: true,
+          capabilities: { cleanup: true },
+          diagnostics: []
+        }}
+        onBack={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '清理' }));
+    expect(screen.getByRole('heading', { name: '运行数据清理' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '诊断' }));
+    expect(screen.getByRole('heading', { name: '诊断' })).toBeInTheDocument();
+    expect(screen.getByText(runtimeStatus.codexPath)).toBeInTheDocument();
+  });
+
+  it('shows disconnected local runtime status in about advanced information', () => {
+    render(<OpenCreatorSettingsView runtimeStatus={{ ...runtimeStatus, connected: false }} onBack={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '关于 OpenCreator' }));
+
+    const advanced = screen.getByRole('region', { name: '高级信息' });
+    expect(within(advanced).getByText('本地运行内核状态')).toBeInTheDocument();
+    expect(within(advanced).getByText('未连接')).toBeInTheDocument();
+  });
+
+  it('calls onBack when returning to the app', () => {
+    const onBack = vi.fn();
+    render(<OpenCreatorSettingsView runtimeStatus={runtimeStatus} onBack={onBack} />);
+
+    fireEvent.click(screen.getByRole('button', { name: '返回应用' }));
+
+    expect(onBack).toHaveBeenCalledTimes(1);
+  });
+});

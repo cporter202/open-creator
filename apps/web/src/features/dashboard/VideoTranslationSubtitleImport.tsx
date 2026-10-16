@@ -1,0 +1,117 @@
+import { useId, useRef, useState } from 'react';
+import { X } from 'lucide-react';
+import { useLocalizedCopy } from '../../i18n/useLocalizedCopy.js';
+import {
+  captureCreatorClientFailure,
+  useOptionalCreatorSession
+} from './creator-session-store.js';
+
+export function VideoTranslationSubtitleImport(props: { sourceLanguage: string; targetLanguage: string; disabled: boolean; sourceOnly?: boolean; onBusyChange?(busy: boolean): void }) {
+  const l = useLocalizedCopy();
+  const session = useOptionalCreatorSession();
+  const [enabled, setEnabled] = useState(() => session?.job.artifacts.some(artifact => artifact.metadata.source === 'local-upload' && artifact.kind.endsWith('_subtitle')) ?? false);
+  const [kind, setKind] = useState('source_subtitle');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [selectedFileName, setSelectedFileName] = useState('');
+  const fileInputId = useId();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  if (session === null) return null;
+  const imports = session.job.artifacts.filter(artifact => artifact.metadata.source === 'local-upload'
+    && (props.sourceOnly ? artifact.id === session.state.importedSourceSubtitleId : artifact.kind.endsWith('_subtitle')));
+
+  async function importFile(file: File) {
+    if (session === null) return;
+    if (!/\.srt$/i.test(file.name) || file.size > 512 * 1024) {
+      setError(l('请选择不超过 512 KiB 的 UTF-8 SRT 文件', 'Choose a UTF-8 SRT file up to 512 KiB'));
+      return;
+    }
+    setBusy(true);
+    props.onBusyChange?.(true);
+    setError('');
+    try {
+      const contentBase64 = await captureCreatorClientFailure(
+        session,
+        'creator.read-subtitle-file',
+        l('字幕文件读取失败，请检查文件后重试。', 'The subtitle file could not be read. Check the file and try again.'),
+        () => new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result).split(',')[1]!);
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(file);
+        })
+      );
+      await session.applyAction({ action: 'import-subtitle', input: {
+        fileName: file.name, contentBase64, kind: props.sourceOnly ? 'source_subtitle' : kind,
+        language: props.sourceOnly || kind === 'source_subtitle' ? props.sourceLanguage : props.targetLanguage
+      } });
+    } catch {
+      // The session records runtime and file-read failures in the shared Agent panel.
+    } finally {
+      setBusy(false);
+      props.onBusyChange?.(false);
+    }
+  }
+
+  return <div className="video-translation-subtitle-import" role="group" aria-label={l('导入已有字幕', 'Import existing subtitles')}>
+    {!props.sourceOnly ? <div className={`video-translation-toggle-row${props.disabled ? ' is-disabled' : ''}`}>
+      <span>
+        <strong>{l('导入已有字幕', 'Import existing subtitles')}</strong>
+        <small>{l('使用本地 SRT 字幕文件', 'Use a local SRT subtitle file')}</small>
+      </span>
+      <button
+        className="video-translation-switch"
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        aria-label={l('导入已有字幕', 'Import existing subtitles')}
+        disabled={props.disabled}
+        onClick={() => setEnabled(value => !value)}
+      >
+        <span />
+      </button>
+    </div> : null}
+    {enabled || props.sourceOnly ? <fieldset className="video-translation-subtitle-import-fields video-translation-field" disabled={props.disabled || busy}>
+      {!props.sourceOnly ? <label><span>{l('字幕类型', 'Subtitle type')}</span>
+        <select value={kind} onChange={event => setKind(event.target.value)}>
+          <option value="source_subtitle">{l('原文字幕（跳过语音识别）', 'Source subtitles (skip transcription)')}</option>
+          <option value="target_subtitle">{l('已翻译字幕（跳过识别和翻译）', 'Translated subtitles (skip transcription and translation)')}</option>
+        </select>
+      </label> : null}
+      <div className="video-translation-subtitle-file-field">
+        <label htmlFor={fileInputId}>{l('UTF-8 SRT 文件', 'UTF-8 SRT file')}</label>
+        <div className="video-translation-subtitle-file-picker">
+          <input ref={fileInputRef} id={fileInputId} className="app-visually-hidden" tabIndex={-1} type="file" accept=".srt" onChange={event => {
+            const file = event.target.files?.[0];
+            event.target.value = '';
+            if (file) {
+              setSelectedFileName(file.name);
+              void importFile(file);
+            }
+          }} />
+          <button type="button" onClick={() => fileInputRef.current?.click()}>{props.sourceOnly && imports.length > 0 ? l('更换文件', 'Replace file') : l('选择文件', 'Choose file')}</button>
+          <span aria-live="polite">{String(imports.at(-1)?.metadata.fileName ?? '') || selectedFileName || l('未选择文件', 'No file selected')}</span>
+          {props.sourceOnly && imports.length > 0 ? <button
+            type="button"
+            className="video-translation-subtitle-remove"
+            aria-label={l('移除字幕', 'Remove subtitles')}
+            title={l('移除字幕', 'Remove subtitles')}
+            onClick={() => {
+              setSelectedFileName('');
+              setError('');
+              if (fileInputRef.current) fileInputRef.current.value = '';
+              session.updateDraft({ importedSourceSubtitleId: null, importedTargetSubtitleId: null });
+            }}
+          ><X size={16} aria-hidden="true" /></button> : null}
+        </div>
+      </div>
+      {!props.sourceOnly ? <p>{l('语言沿用上方选择。仅有译文时不会生成双语字幕。', 'Uses the language selected above. A translated-only import does not generate bilingual subtitles.')}</p> : null}
+      {busy ? <p role="status">{l('正在导入字幕…', 'Importing subtitles…')}</p> : null}
+      {error ? <p role="alert">{error}</p> : null}
+      {imports.map(artifact => <details key={artifact.id} open={props.sourceOnly}>
+        <summary>{l('本地导入', 'Local import')} · {String(artifact.metadata.fileName)} · {String(artifact.metadata.language)} · {String(artifact.metadata.cueCount)} {l('条字幕', 'cues')} · v{artifact.version}</summary>
+        <pre>{Array.isArray(artifact.metadata.cues) ? artifact.metadata.cues.map(cue => cue !== null && typeof cue === 'object' && !Array.isArray(cue) ? `${cue.start} → ${cue.end}\n${cue.text}` : '').join('\n\n') : ''}</pre>
+      </details>)}
+    </fieldset> : null}
+  </div>;
+}

@@ -1,0 +1,394 @@
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs';
+import { createHash } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { dirname, join, relative } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { verifyCreatorRuntime } from '../scripts/creator-runtime-contract.mjs';
+import { verifyStickmanRuntime } from '../scripts/stickman-runtime-contract.mjs';
+import {
+  signDaemonRuntimeBundle,
+  signCreatorRuntimeBundle,
+  signStickmanRuntimeBundle,
+  signRemotionComponent,
+  normalizeRemotionLibraryPaths,
+  updateManifestHashes
+} from '../scripts/sign-creator-runtime-after-pack.mjs';
+
+const temporaryDirectories = [];
+
+afterEach(() => {
+  for (const path of temporaryDirectories.splice(0)) {
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+describe('Creator Runtime Developer ID signing', () => {
+  it('binds relative Remotion libraries to their packaged loader directory', () => {
+    const fixture = createStickmanFixture();
+    const browser = fixture.binaryPaths[0];
+    const library = join(dirname(browser), 'libavdevice.dylib');
+    writeFileSync(library, 'library');
+    const runTool = vi.fn(() => `${browser}:\n\tlibavdevice.dylib (compatibility version 61.0.0, current version 61.3.100)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)\n\t@rpath/libother.dylib (compatibility version 1.0.0, current version 1.0.0)\n`);
+    normalizeRemotionLibraryPaths(browser, fixture.runtimeRoot, { runTool });
+    expect(runTool.mock.calls).toEqual([
+      ['otool', ['-L', browser]],
+      ['install_name_tool', ['-change', 'libavdevice.dylib', '@loader_path/libavdevice.dylib', browser]]
+    ]);
+  });
+
+  it('normalizes the install name of a bundled Remotion dynamic library', () => {
+    const fixture = createStickmanFixture();
+    const library = join(dirname(fixture.binaryPaths[0]), 'libavdevice.dylib');
+    writeFileSync(library, 'library');
+    const runTool = vi.fn(() => `${library}:\n\tlibavdevice.dylib (compatibility version 61.0.0, current version 61.3.100)\n`);
+    normalizeRemotionLibraryPaths(library, fixture.runtimeRoot, { runTool });
+    expect(runTool).toHaveBeenCalledWith('install_name_tool', ['-id', '@loader_path/libavdevice.dylib', library]);
+  });
+
+  it('rejects relative Remotion libraries missing from the bundle', () => {
+    const fixture = createStickmanFixture();
+    const runTool = vi.fn(() => '\tmissing.dylib (compatibility version 1.0.0, current version 1.0.0)\n');
+    expect(() => normalizeRemotionLibraryPaths(fixture.binaryPaths[0], fixture.runtimeRoot, { runTool })).toThrow('Remotion relative library is not bundled: missing.dylib');
+    expect(runTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('signs the independent Remotion component using its prepared keychain and refreshes final hashes', async () => {
+    const fixture = createStickmanFixture();
+    const findIdentity = vi.fn(() => 'Developer ID Application: Junxi YIN (NVRH5R5DJ5)');
+    const signBinary = vi.fn(path => writeFileSync(path, Buffer.concat([
+      readFileSync(path), Buffer.from('-component-signature')
+    ])));
+    const withKeychain = vi.fn(async (env, action) => action({ ...env, APPLE_KEYCHAIN: '/tmp/component-test.keychain' }));
+    await signRemotionComponent(fixture.runtimeRoot, {
+      ...signingEnv(), OPENCREATOR_SIGN_CREATOR_RUNTIME: '1', CSC_LINK: 'test-p12', CSC_KEY_PASSWORD: 'test-password'
+    }, { platform: 'darwin', withKeychain, findIdentity, findBinaries: () => fixture.binaryPaths, signBinary });
+    expect(withKeychain).toHaveBeenCalledTimes(1);
+    expect(findIdentity).toHaveBeenCalledWith('NVRH5R5DJ5', '/tmp/component-test.keychain');
+    const browserCall = signBinary.mock.calls.find(([path]) => path === fixture.binaryPaths[0]);
+    expect(browserCall.slice(0, 3)).toEqual([fixture.binaryPaths[0], 'Developer ID Application: Junxi YIN (NVRH5R5DJ5)', '/tmp/component-test.keychain']);
+    const entitlements = readFileSync(browserCall[3], 'utf8');
+    expect(entitlements).toMatch(/com\.apple\.security\.cs\.allow-jit<\/key>\s*<true\/>/);
+    expect(entitlements).toMatch(/com\.apple\.security\.cs\.allow-unsigned-executable-memory<\/key>\s*<true\/>/);
+    expect(entitlements).toMatch(/com\.apple\.security\.cs\.disable-library-validation<\/key>\s*<false\/>/);
+    expect(() => verifyStickmanRuntime(fixture.runtimeRoot, 'darwin', 'arm64')).not.toThrow();
+  });
+
+  it('does not grant browser JIT permissions to other Remotion native binaries', async () => {
+    const fixture = createStickmanFixture();
+    const compositor = join(fixture.runtimeRoot, 'node_modules', 'compositor', 'ffmpeg');
+    mkdirSync(dirname(compositor), { recursive: true });
+    writeFileSync(compositor, 'ffmpeg');
+    const manifestPath = join(fixture.runtimeRoot, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    manifest.resources.push({ ...manifest.resources.find(resource => resource.kind === 'browser'), path: relative(fixture.runtimeRoot, compositor).replaceAll('\\', '/'), kind: 'renderer', sha256: hashFile(compositor), bytes: readFileSync(compositor).length });
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const signBinary = vi.fn();
+    await signRemotionComponent(fixture.runtimeRoot, {
+      ...signingEnv(), OPENCREATOR_SIGN_CREATOR_RUNTIME: '1', APPLE_KEYCHAIN: '/tmp/component-test.keychain'
+    }, { platform: 'darwin', findIdentity: () => 'test-identity', findBinaries: () => [...fixture.binaryPaths, compositor], signBinary });
+    expect(signBinary).toHaveBeenCalledWith(compositor, 'test-identity', '/tmp/component-test.keychain');
+    expect(() => verifyStickmanRuntime(fixture.runtimeRoot, 'darwin', 'arm64')).not.toThrow();
+  });
+
+  it('verifies the input, signs binaries and records their final hashes', async () => {
+    const fixture = createFixture();
+    const verifyRuntime = vi.fn(verifyCreatorRuntime);
+    const signBinary = vi.fn(path => {
+      writeFileSync(path, Buffer.concat([
+        readFileSync(path),
+        Buffer.from('-developer-id-signature')
+      ]));
+    });
+
+    await signCreatorRuntimeBundle({
+      electronPlatformName: 'darwin',
+      appOutDir: fixture.appOutDir,
+      packager: {
+        appInfo: { productFilename: 'OpenCreator' },
+        codeSigningInfo: {
+          value: Promise.resolve({ keychainFile: '/tmp/release.keychain' })
+        }
+      }
+    }, {
+      env: {
+        OPENCREATOR_APPLE_TEAM_ID: 'NVRH5R5DJ5',
+        OPENCREATOR_DESKTOP_TARGET_ARCH: 'arm64'
+      },
+      findIdentity: () => (
+        'Developer ID Application: Junxi YIN (NVRH5R5DJ5)'
+      ),
+      findBinaries: () => fixture.binaryPaths,
+      signBinary,
+      verifyRuntime
+    });
+
+    expect(verifyRuntime).toHaveBeenCalledTimes(2);
+    expect(signBinary).toHaveBeenCalledTimes(fixture.binaryPaths.length);
+    expect(signBinary).toHaveBeenCalledWith(
+      fixture.binaryPaths[0],
+      'Developer ID Application: Junxi YIN (NVRH5R5DJ5)',
+      '/tmp/release.keychain'
+    );
+    expect(() => verifyCreatorRuntime(
+      fixture.runtimeRoot,
+      'darwin',
+      'arm64'
+    )).not.toThrow();
+    const manifest = JSON.parse(readFileSync(
+      join(fixture.runtimeRoot, 'manifest.json'),
+      'utf8'
+    ));
+    for (const path of fixture.binaryPaths) {
+      const relativePath = relative(fixture.runtimeRoot, path)
+        .replaceAll('\\', '/');
+      const resource = manifest.resources.find(
+        candidate => candidate.path === relativePath
+      );
+      expect(resource.sha256).toBe(hashFile(path));
+    }
+  });
+
+  it('rejects signed binaries that are absent from the manifest', () => {
+    const fixture = createFixture();
+    const undeclared = join(fixture.runtimeRoot, 'bin', 'undeclared');
+    writeFileSync(undeclared, 'binary');
+
+    expect(() => updateManifestHashes(
+      fixture.runtimeRoot,
+      [undeclared]
+    )).toThrow(/absent from its manifest/i);
+  });
+
+  it('grants V8 JIT permissions only to the bundled Node executable', async () => {
+    const fixture = createFixture({ javascriptRuntime: true });
+    const signBinary = vi.fn();
+    await signCreatorRuntimeBundle(createContext(fixture.appOutDir), {
+      env: signingEnv(), findIdentity: () => 'Developer ID Application: Junxi YIN (NVRH5R5DJ5)',
+      findBinaries: () => fixture.binaryPaths, signBinary
+    });
+    for (const call of signBinary.mock.calls) {
+      if (call[0] === join(fixture.runtimeRoot, 'bin', 'node')) {
+        expect(readFileSync(call[3], 'utf8')).toMatch(/com\.apple\.security\.cs\.allow-jit<\/key>\s*<true\/>/);
+      } else {
+        expect(call).toHaveLength(3);
+      }
+    }
+  });
+
+  it('signs the packaged Stickman browser and refreshes its manifest', async () => {
+    const fixture = createStickmanFixture();
+    const signBinary = vi.fn(path => {
+      writeFileSync(path, Buffer.concat([
+        readFileSync(path),
+        Buffer.from('-developer-id-signature')
+      ]));
+    });
+
+    await signStickmanRuntimeBundle(createContext(fixture.appOutDir), {
+      env: signingEnv(),
+      findIdentity: () => 'Developer ID Application: Junxi YIN (NVRH5R5DJ5)',
+      findBinaries: () => fixture.binaryPaths,
+      signBinary
+    });
+
+    expect(signBinary).toHaveBeenCalledTimes(fixture.binaryPaths.length);
+    expect(() => verifyStickmanRuntime(
+      fixture.runtimeRoot,
+      'darwin',
+      'arm64'
+    )).not.toThrow();
+  });
+
+  it('signs native dependencies in the packaged Daemon', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'opencreator-daemon-signing-'));
+    temporaryDirectories.push(root);
+    const appOutDir = join(root, 'mac-arm64');
+    const daemonRoot = join(
+      appOutDir,
+      'OpenCreator.app',
+      'Contents',
+      'Resources',
+      'daemon'
+    );
+    const binaryPaths = [
+      join(daemonRoot, 'node_modules', '@remotion', 'compositor', 'ffmpeg'),
+      join(daemonRoot, 'node_modules', '@img', 'sharp', 'libvips.dylib')
+    ];
+    for (const path of binaryPaths) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, 'binary');
+    }
+    const signBinary = vi.fn();
+
+    await signDaemonRuntimeBundle(createContext(appOutDir), {
+      env: signingEnv(),
+      findIdentity: () => 'Developer ID Application: Junxi YIN (NVRH5R5DJ5)',
+      findBinaries: () => binaryPaths,
+      signBinary
+    });
+
+    expect(signBinary).toHaveBeenCalledTimes(binaryPaths.length);
+    expect(signBinary).toHaveBeenCalledWith(
+      binaryPaths[0],
+      'Developer ID Application: Junxi YIN (NVRH5R5DJ5)',
+      '/tmp/release.keychain'
+    );
+  });
+});
+
+function createContext(appOutDir) {
+  return {
+    electronPlatformName: 'darwin',
+    appOutDir,
+    packager: {
+      appInfo: { productFilename: 'OpenCreator' },
+      codeSigningInfo: {
+        value: Promise.resolve({ keychainFile: '/tmp/release.keychain' })
+      }
+    }
+  };
+}
+
+function signingEnv() {
+  return {
+    OPENCREATOR_APPLE_TEAM_ID: 'NVRH5R5DJ5',
+    OPENCREATOR_DESKTOP_TARGET_ARCH: 'arm64'
+  };
+}
+
+function createFixture(options = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'opencreator-runtime-signing-'));
+  temporaryDirectories.push(root);
+  const appOutDir = join(root, 'mac-arm64');
+  const runtimeRoot = join(
+    appOutDir,
+    'OpenCreator.app',
+    'Contents',
+    'Resources',
+    'creator-runtime',
+    'krillinai'
+  );
+  const files = {
+    'bin/krillinai-cli': 'krillin',
+    'bin/ffmpeg': 'ffmpeg',
+    'bin/ffprobe': 'ffprobe',
+    'bin/yt-dlp': 'yt-dlp',
+    ...(options.javascriptRuntime ? { 'bin/node': 'node' } : {}),
+    'build-record.json': '{"version":1}',
+    'subtitle-style.json': '{"version":1}'
+  };
+  for (const [relativePath, contents] of Object.entries(files)) {
+    const path = join(runtimeRoot, relativePath);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, contents);
+  }
+  const resources = Object.keys(files).map(path => ({
+    path,
+    sha256: hashFile(join(runtimeRoot, path)),
+    kind: path.startsWith('bin/') ? 'executable' : 'asset'
+  }));
+  const manifest = {
+    version: 1,
+    runtimeMode: 'cli',
+    cliVersion: 'test',
+    sourceCommit: 'test',
+    sourceSha256: 'b'.repeat(64),
+    integrationPatchSha256: 'a'.repeat(64),
+    platform: 'darwin',
+    arch: 'arm64',
+    ytDlp: {
+      mode: 'standalone',
+      version: 'test',
+      executable: 'bin/yt-dlp',
+      ...(options.javascriptRuntime ? { javascriptRuntime: {
+        name: 'node', version: '22.23.2', executable: 'bin/node'
+      } } : {})
+    },
+    resources
+  };
+  writeFileSync(
+    join(runtimeRoot, 'manifest.json'),
+    `${JSON.stringify(manifest, null, 2)}\n`
+  );
+  return {
+    appOutDir,
+    runtimeRoot,
+    binaryPaths: [
+      join(runtimeRoot, 'bin', 'krillinai-cli'),
+      join(runtimeRoot, 'bin', 'ffmpeg'),
+      join(runtimeRoot, 'bin', 'ffprobe'),
+      join(runtimeRoot, 'bin', 'yt-dlp'),
+      ...(options.javascriptRuntime ? [join(runtimeRoot, 'bin', 'node')] : [])
+    ]
+  };
+}
+
+function createStickmanFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'opencreator-stickman-signing-'));
+  temporaryDirectories.push(root);
+  const appOutDir = join(root, 'mac-arm64');
+  const runtimeRoot = join(
+    appOutDir,
+    'OpenCreator.app',
+    'Contents',
+    'Resources',
+    'stickman-runtime'
+  );
+  const files = {
+    'bundle/site/index.html': '<html></html>',
+    'browser/chrome-headless-shell': 'chromium',
+    'fonts/NotoSans-Bold.woff2': 'font',
+    'fonts/NotoSansSC-Bold.woff2': 'font',
+    'fonts/OFL.txt': 'license',
+    'visual-assets/catalog.json': '{}'
+  };
+  for (const character of [
+    'default', 'tech-guy', 'long-hair', 'short-hair', 'hiphop',
+    'student', 'elder', 'manager', 'chef', 'fitness'
+  ]) {
+    files[`characters/${character}.png`] = character;
+  }
+  for (const [relativePath, contents] of Object.entries(files)) {
+    const path = join(runtimeRoot, relativePath);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, contents);
+  }
+  const resources = Object.keys(files).map(path => ({
+    path,
+    kind: path.startsWith('browser/') ? 'browser'
+      : path.startsWith('bundle/') ? 'bundle'
+        : path.startsWith('fonts/') ? 'font'
+          : path.startsWith('characters/') ? 'character'
+            : 'visual-asset',
+    sha256: hashFile(join(runtimeRoot, path)),
+    bytes: readFileSync(join(runtimeRoot, path)).length,
+    version: 'test',
+    platform: 'darwin',
+    arch: 'arm64'
+  }));
+  writeFileSync(join(runtimeRoot, 'manifest.json'), `${JSON.stringify({
+    version: 1,
+    platform: 'darwin',
+    arch: 'arm64',
+    remotionVersion: '4.0.473',
+    chromiumVersion: '149.0.7790.0',
+    bundlePath: 'bundle/site',
+    browserExecutable: 'browser/chrome-headless-shell',
+    resources
+  }, null, 2)}\n`);
+  return {
+    appOutDir,
+    runtimeRoot,
+    binaryPaths: [join(runtimeRoot, 'browser', 'chrome-headless-shell')]
+  };
+}
+
+function hashFile(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}

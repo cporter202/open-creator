@@ -1,0 +1,1766 @@
+import type {
+  CreateCreatorJobRequest,
+  CreatorActionRequest,
+  CreatorArtifactImportRequest,
+  CreatorAgentApprovalDecisionRequest,
+  CreatorAgentEvent,
+  CreatorAgentHistoryResponse,
+  CreatorAgentItem,
+  CreatorAgentTurnRequest,
+  CreatorClientIssueReportRequest,
+  CreatorEventEnvelope,
+  CreatorJob,
+  CreatorJson,
+  CreatorStageRun,
+  CreatorServicesConfig,
+  IssueSource,
+  OpenCreatorIssue,
+  RuntimeErrorCode
+} from '@opencreator/protocol';
+import { isCreateCreatorJobRequest, isOpenCreatorIssue } from '@opencreator/protocol';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { rm, stat } from 'node:fs/promises';
+import { basename, extname, resolve, sep } from 'node:path';
+import type { Readable } from 'node:stream';
+import type { FastifyInstance, FastifyReply } from 'fastify';
+import { z, ZodError } from 'zod';
+import { creatorSubtitleStyleSchema } from '../creator/presets/module-schemas.js';
+import type { SubtitlePreviewService } from '../creator/krillin/subtitle-preview.js';
+import type { CreatorEventHub } from '../creator/events.js';
+import {
+  creatorAgentEventKind,
+  creatorIssueEventId,
+  creatorStageEventId
+} from '../creator/events.js';
+import {
+  CreatorServiceError,
+  type CreatorService
+} from '../creator/service.js';
+import { CreatorRepositoryDataError } from '../creator/repository.js';
+import { publicFactsFromFailure } from '../creator/public-error-facts.js';
+import { formatSseEvent } from './sse.js';
+import { apiError } from './errors.js';
+import type { CreatorAgentService } from '../creator/agent/agent-service.js';
+import {
+  CreatorCommandError,
+  type CreatorCommandDispatcher
+} from '../creator/command-dispatcher.js';
+import {
+  CoverWorkflowError,
+  type CoverWorkflow
+} from '../creator/templates/cover-actions.js';
+import {
+  VideoTranslationWorkflowError,
+  type VideoTranslationWorkflow
+} from '../creator/templates/video-translation-actions.js';
+import type { StickmanVideoWorkflow } from '../creator/templates/stickman-video-actions.js';
+import {
+  StickmanVisualAssetError,
+  type StickmanVisualAssetRegistry
+} from '../creator/stickman/visual-assets.js';
+import type { CreatorProjectCoverService } from '../creator/project-cover.js';
+import type { CreatorStageRunner } from '../creator/stage-runner.js';
+import { CreatorPreflightError, type CreatorPreflight } from '../creator/preflight.js';
+import {
+  CreatorArtifactImportError,
+  type CreatorArtifactImportService
+} from '../creator/artifact-import.js';
+import {
+  CREATOR_REFERENCE_IMAGE_CONTENT_TYPE,
+  CreatorReferenceImageUploadError,
+  type CreatorReferenceImageUploadService
+} from '../creator/reference-image-upload.js';
+import {
+  CREATOR_SOURCE_UPLOAD_CONTENT_TYPE,
+  CreatorSourceUploadError,
+  type CreatorSourceUploadService
+} from '../creator/source-upload.js';
+import {
+  CREATOR_DOCUMENT_UPLOAD_CONTENT_TYPE,
+  CreatorDocumentUploadError,
+  type CreatorDocumentUploadService
+} from '../creator/document-upload.js';
+import {
+  normalizeCreatorPresetLocale,
+  resolveCreatorPresetAsset
+} from '../creator/presets/catalog.js';
+import type { CreatorPresetRegistry } from '../creator/presets/types.js';
+import { createCreatorPresetDetails } from '../creator/presets/presentation.js';
+import { readCodexImageConfiguration } from '../image-generation/codex-runtime.js';
+import type { CodexNativeImageRuntime } from '../image-generation/provider.js';
+import type { CreatorIssueService } from '../creator/issues.js';
+import { registerCreatorThumbnailRoutes } from './routes.creator-thumbnail.js';
+
+export async function registerCreatorRoutes(
+  server: FastifyInstance,
+  service: CreatorService,
+  events: CreatorEventHub,
+  options: {
+    sseHeartbeatMs?: number;
+    agentService?: CreatorAgentService;
+    coverWorkflow?: CoverWorkflow;
+    videoTranslationWorkflow?: VideoTranslationWorkflow;
+    stickmanVideoWorkflow?: StickmanVideoWorkflow;
+    stickmanVisualAssets?: StickmanVisualAssetRegistry;
+    projectCoverService?: CreatorProjectCoverService;
+    referenceImageUploadService?: CreatorReferenceImageUploadService;
+    sourceUploadService?: CreatorSourceUploadService;
+    documentUploadService?: CreatorDocumentUploadService;
+    artifactImportService?: CreatorArtifactImportService;
+    jobsRoot: string;
+    dispatcher: CreatorCommandDispatcher;
+    preflight?: Pick<CreatorPreflight, 'check'>;
+    stageRunner?: Pick<CreatorStageRunner, 'cancel' | 'cancelJob'>;
+    presets?: CreatorPresetRegistry;
+    presetCatalogRoot?: string;
+    readServicesConfig?(): Promise<CreatorServicesConfig>;
+    codexImageRuntime?: CodexNativeImageRuntime;
+    issueService?: CreatorIssueService;
+    subtitlePreviewService?: SubtitlePreviewService;
+  }
+): Promise<void> {
+  await registerCreatorThumbnailRoutes(server, service, options.readServicesConfig);
+  server.get('/creator/subtitle-preview', async (request, reply) => {
+    try {
+      const query = readObject(request.query);
+      const input = z.object({
+        width: z.number().int().min(32).max(1920),
+        height: z.number().int().min(32).max(1920),
+        subtitleStyle: creatorSubtitleStyleSchema,
+        bilingual: z.boolean(),
+        subtitlePosition: z.enum(['top', 'bottom']),
+        translationText: z.string().min(1).max(128).regex(/^[^\r\n{}\\]+$/u),
+        originalText: z.string().min(1).max(128).regex(/^[^\r\n{}\\]+$/u)
+      }).strict().parse(JSON.parse(readString(query.options, 'options')));
+      if (options.subtitlePreviewService === undefined) {
+        return reply.code(503).send(apiError('creator_subtitle_style_unsupported', 'Subtitle renderer is unavailable'));
+      }
+      const controller = new AbortController();
+      const cancel = () => { if (!reply.raw.writableEnded) controller.abort(); };
+      reply.raw.once('close', cancel);
+      try {
+        const png = await options.subtitlePreviewService.render(input, controller.signal);
+        return reply.type('image/png').header('Cache-Control', 'no-store').send(png);
+      } finally {
+        reply.raw.removeListener('close', cancel);
+      }
+    } catch (error) {
+      if (error instanceof SyntaxError) return reply.code(400).send(apiError('VALIDATION_FAILED', 'Invalid preview options'));
+      if (error instanceof ZodError || error instanceof TypeError) return sendCreatorError(reply, error);
+      return reply.code(503).send(apiError('creator_subtitle_style_unsupported', error instanceof Error ? error.message : 'Subtitle preview failed'));
+    }
+  });
+  if (options.stickmanVisualAssets !== undefined) {
+    server.get('/creator/visual-assets', async (request, reply) => {
+      try {
+        const query = readObject(request.query);
+        const templateId = readString(query.templateId, 'templateId');
+        if (templateId !== 'stickman-video') {
+          return reply.code(404).send(apiError(
+            'creator_artifact_not_found',
+            'Creator visual asset catalog was not found'
+          ));
+        }
+        const kind = query.kind === undefined ? undefined : readString(query.kind, 'kind');
+        if (kind !== undefined && kind !== 'character' && kind !== 'style') {
+          throw new TypeError('kind must be character or style');
+        }
+        return options.stickmanVisualAssets!.list(kind);
+      } catch (error) {
+        return sendCreatorError(reply, error);
+      }
+    });
+    server.get(
+      '/creator/visual-assets/:id/revisions/:revision/preview',
+      async (request, reply) => {
+        try {
+          const { id, revision } = request.params as { id: string; revision: string };
+          const preview = options.stickmanVisualAssets!.preview({
+            assetId: id,
+            revision: readQueryInteger(revision, 'revision')
+          });
+          if (preview === undefined) {
+            return reply.code(404).send(apiError(
+              'creator_artifact_not_found',
+              'Creator visual asset preview was not found'
+            ));
+          }
+          return reply
+            .type(preview.mimeType)
+            .header('Cache-Control', 'private, max-age=86400, immutable')
+            .header('Content-Disposition', 'inline')
+            .send(preview.stream);
+        } catch (error) {
+          return sendCreatorError(reply, error);
+        }
+      }
+    );
+  }
+  if (options.presets !== undefined && options.presetCatalogRoot !== undefined) {
+    const presets = options.presets;
+    const presetCatalogRoot = options.presetCatalogRoot;
+    server.get('/creator/presets', async request => {
+    const locale = normalizeCreatorPresetLocale(readObject(request.query).locale);
+    let config: CreatorServicesConfig | undefined;
+    try {
+      config = await options.readServicesConfig?.();
+    } catch {
+      // Model details are optional; credentials must not prevent browsing templates.
+    }
+    const published = presets.listPublished(locale);
+    let codexImageModel: string | undefined;
+    if (config !== undefined && options.codexImageRuntime !== undefined && published.some(preset => {
+      if (preset.module !== 'image-generation' && preset.module !== 'cover-generator') return false;
+      const source = presets.get(preset);
+      const provider = source.defaultsByLocale?.[locale]?.provider ?? source.defaults.provider ?? config.image.provider;
+      return provider === 'codex-native';
+    })) {
+      try {
+        const imageConfig = await readCodexImageConfiguration(options.codexImageRuntime);
+        if (imageConfig.authentication === 'api_key') codexImageModel = imageConfig.provider.model;
+      } catch {
+        // Unconfigured local credentials must not prevent browsing templates.
+      }
+    }
+    return {
+      locale,
+      catalogHash: presets.catalogHash,
+      presets: config === undefined ? published : published.map(preset => ({
+        ...preset,
+        details: createCreatorPresetDetails(presets.get(preset), locale, config, codexImageModel)
+      }))
+    };
+    });
+
+    server.get('/creator-presets/:fileName', async (request, reply) => {
+    try {
+      const { fileName } = request.params as { fileName: string };
+      const file = resolveCreatorPresetAsset(presetCatalogRoot, fileName);
+      const info = await stat(file);
+      if (!info.isFile()) throw new Error('Preset asset is not a file');
+      const rangeHeader = typeof request.headers.range === 'string'
+        ? request.headers.range
+        : undefined;
+      const range = parseByteRange(rangeHeader, info.size);
+      if (rangeHeader !== undefined && range === undefined) {
+        reply.header('Content-Range', `bytes */${info.size}`);
+        return reply.code(416).send();
+      }
+      reply.type(contentTypeForPresetAsset(fileName));
+      reply.header('Accept-Ranges', 'bytes');
+      reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+      if (range !== undefined) {
+        reply.code(206);
+        reply.header('Content-Length', String(range.end - range.start + 1));
+        reply.header('Content-Range', `bytes ${range.start}-${range.end}/${info.size}`);
+        return reply.send(createReadStream(file, range));
+      }
+      reply.header('Content-Length', String(info.size));
+      return reply.send(createReadStream(file));
+    } catch {
+      return reply.code(404).send(apiError('creator_preset_not_found', 'Creator preset asset not found'));
+    }
+    });
+  }
+
+  if (options.sourceUploadService !== undefined) {
+    server.addContentTypeParser(
+      CREATOR_SOURCE_UPLOAD_CONTENT_TYPE,
+      (_request, payload, done) => done(null, payload)
+    );
+    server.post<{ Body: Readable }>('/creator/jobs/:id/source-video', async (request, reply) => {
+      const { id } = request.params as { id: string };
+      let repair: { issueId: string; attemptId: string } | undefined;
+      try {
+        const query = readObject(request.query);
+        repair = readUploadRepairContext(query);
+        if (repair !== undefined) {
+          if (options.issueService === undefined) throw new TypeError('Creator issue service is unavailable');
+          options.issueService.beginResolution({
+            jobId: id,
+            issueId: repair.issueId,
+            resolutionAttemptId: repair.attemptId,
+            associationKind: 'endpoint',
+            associationId: repair.attemptId
+          });
+        }
+        if (!isReadable(request.body)) {
+          throw new TypeError('body must be a media stream');
+        }
+        const response = await options.sourceUploadService!.upload({
+          jobId: id,
+          expectedRevision: readQueryInteger(query.expectedRevision, 'expectedRevision'),
+          fileName: readString(query.fileName, 'fileName'),
+          mimeType: readString(query.mime, 'mime'),
+          lastModified: query.lastModified === undefined
+            ? null
+            : readQueryInteger(query.lastModified, 'lastModified'),
+          source: request.body
+        });
+        events.publish({
+          id: `snapshot:${response.job.revision}`,
+          jobId: response.job.id,
+          revision: response.job.revision,
+          kind: 'snapshot_changed',
+          payload: { revision: response.job.revision }
+        });
+        if (repair !== undefined) {
+          options.issueService!.finishResolution({
+            jobId: id,
+            issueId: repair.issueId,
+            resolutionAttemptId: repair.attemptId,
+            result: 'succeeded'
+          });
+        }
+        return reply.code(response.deduplicated ? 200 : 201).send(response);
+      } catch (error) {
+        let existingIssue: OpenCreatorIssue | undefined;
+        if (repair !== undefined && options.issueService !== undefined) {
+          try {
+            existingIssue = options.issueService.finishResolution({
+              jobId: id,
+              issueId: repair.issueId,
+              resolutionAttemptId: repair.attemptId,
+              result: request.raw.aborted
+                ? 'canceled'
+                : error instanceof Error && error.name === 'TimeoutError'
+                  ? 'timeout'
+                  : 'failed'
+            });
+          } catch {
+            existingIssue = undefined;
+          }
+        }
+        return sendCreatorError(reply, error, {
+          jobId: id,
+          source: 'upload',
+          operation: 'creator.upload-source',
+          service,
+          issueService: options.issueService,
+          existingIssue
+        });
+      }
+    });
+  }
+
+  if (options.referenceImageUploadService !== undefined) {
+    server.addContentTypeParser(
+      CREATOR_REFERENCE_IMAGE_CONTENT_TYPE,
+      (_request, payload, done) => done(null, payload)
+    );
+    server.post<{ Body: Readable }>(
+      '/creator/jobs/:id/reference-image',
+      async (request, reply) => {
+        const { id } = request.params as { id: string };
+        try {
+          const query = readObject(request.query);
+          if (!isReadable(request.body)) {
+            throw new TypeError('body must be an image stream');
+          }
+          const response = await options.referenceImageUploadService!.upload({
+            jobId: id,
+            expectedRevision: readQueryInteger(query.expectedRevision, 'expectedRevision'),
+            fileName: readString(query.fileName, 'fileName'),
+            mimeType: readString(query.mime, 'mime'),
+            lastModified: query.lastModified === undefined
+              ? null
+              : readQueryInteger(query.lastModified, 'lastModified'),
+            source: request.body
+          });
+          events.publish({
+            id: `snapshot:${response.job.revision}`,
+            jobId: response.job.id,
+            revision: response.job.revision,
+            kind: 'snapshot_changed',
+            payload: { revision: response.job.revision }
+          });
+          return reply.code(response.deduplicated ? 200 : 201).send(response);
+        } catch (error) {
+          return sendCreatorError(reply, error, {
+            jobId: id,
+            source: 'upload',
+            operation: 'creator.upload-reference-image',
+            service,
+            issueService: options.issueService
+          });
+        }
+      }
+    );
+    server.post<{ Body: Readable }>(
+      '/creator/jobs/:id/article-image',
+      async (request, reply) => {
+        const { id } = request.params as { id: string };
+        try {
+          const query = readObject(request.query);
+          if (!isReadable(request.body)) {
+            throw new TypeError('body must be an image stream');
+          }
+          const response = await options.referenceImageUploadService!.upload({
+            jobId: id,
+            expectedRevision: readQueryInteger(query.expectedRevision, 'expectedRevision'),
+            fileName: readString(query.fileName, 'fileName'),
+            mimeType: readString(query.mime, 'mime'),
+            lastModified: query.lastModified === undefined
+              ? null
+              : readQueryInteger(query.lastModified, 'lastModified'),
+            source: request.body,
+            purpose: 'article'
+          });
+          events.publish({
+            id: `snapshot:${response.job.revision}`,
+            jobId: response.job.id,
+            revision: response.job.revision,
+            kind: 'snapshot_changed',
+            payload: { revision: response.job.revision }
+          });
+          return reply.code(response.deduplicated ? 200 : 201).send(response);
+        } catch (error) {
+          return sendCreatorError(reply, error, {
+            jobId: id,
+            source: 'upload',
+            operation: 'creator.upload-article-image',
+            service,
+            issueService: options.issueService
+          });
+        }
+      }
+    );
+  }
+
+  if (options.documentUploadService !== undefined) {
+    server.addContentTypeParser(
+      CREATOR_DOCUMENT_UPLOAD_CONTENT_TYPE,
+      (_request, payload, done) => done(null, payload)
+    );
+    server.post<{ Body: Readable }>(
+      '/creator/jobs/:id/source-document',
+      async (request, reply) => {
+        const { id } = request.params as { id: string };
+        try {
+          const query = readObject(request.query);
+          if (!isReadable(request.body)) {
+            throw new TypeError('body must be a document stream');
+          }
+          const response = await options.documentUploadService!.upload({
+            jobId: id,
+            expectedRevision: readQueryInteger(query.expectedRevision, 'expectedRevision'),
+            fileName: readString(query.fileName, 'fileName'),
+            mimeType: readString(query.mime, 'mime'),
+            lastModified: query.lastModified === undefined
+              ? null
+              : readQueryInteger(query.lastModified, 'lastModified'),
+            source: request.body
+          });
+          events.publish({
+            id: `snapshot:${response.job.revision}`,
+            jobId: response.job.id,
+            revision: response.job.revision,
+            kind: 'snapshot_changed',
+            payload: { revision: response.job.revision }
+          });
+          return reply.code(response.deduplicated ? 200 : 201).send(response);
+        } catch (error) {
+          return sendCreatorError(reply, error, {
+            jobId: id,
+            source: 'upload',
+            operation: 'creator.upload-document',
+            service,
+            issueService: options.issueService
+          });
+        }
+      }
+    );
+  }
+
+  if (options.artifactImportService !== undefined) {
+    server.post<{ Body: unknown }>(
+      '/creator/jobs/:id/import-artifact',
+      async (request, reply) => {
+        const { id } = request.params as { id: string };
+        try {
+          const body = readObject(request.body);
+          const kind = readString(body.kind, 'kind');
+          if (kind !== 'source_video') {
+            throw new TypeError('kind must be source_video');
+          }
+          const response = await options.artifactImportService!.importArtifact(id, {
+            expectedRevision: readInteger(body.expectedRevision, 'expectedRevision'),
+            sourceJobId: readString(body.sourceJobId, 'sourceJobId'),
+            artifactId: readString(body.artifactId, 'artifactId'),
+            kind
+          } satisfies CreatorArtifactImportRequest);
+          events.publish({
+            id: `snapshot:${response.job.revision}`,
+            jobId: response.job.id,
+            revision: response.job.revision,
+            kind: 'snapshot_changed',
+            payload: { revision: response.job.revision }
+          });
+          return reply.code(response.deduplicated ? 200 : 201).send(response);
+        } catch (error) {
+          return sendCreatorError(reply, error);
+        }
+      }
+    );
+  }
+
+  server.get('/creator/templates', async () => ({
+    templates: service.templates.list().map(template => ({
+      id: template.id,
+      version: template.version,
+      renderer: template.renderer,
+      outputs: template.outputs
+    }))
+  }));
+
+  server.get<{ Params: { id: string }; Querystring: { stageId?: string; inputResultVersion?: string } }>(
+    '/creator/jobs/:id/preflight',
+    async (request, reply) => {
+      try {
+        const job = requireCreatorJob(service, request.params.id);
+        if (options.preflight === undefined) {
+          return reply.code(503).send(apiError('creator_preflight_unavailable' as RuntimeErrorCode, 'Creator preflight is unavailable'));
+        }
+        const stageId = readString(request.query.stageId, 'stageId');
+        const stage = service.templates.get(job.templateId, job.templateVersion).stages.find(candidate => candidate.id === stageId);
+        if (stage === undefined) throw new CreatorServiceError('creator_stage_not_found', 'Creator stage was not found');
+        return options.preflight.check(job, stage, {
+          ...(request.query.inputResultVersion === undefined
+            ? {}
+            : { inputResultVersion: readQueryInteger(request.query.inputResultVersion, 'inputResultVersion') })
+        });
+      } catch (error) {
+        return sendCreatorError(reply, error, {
+          jobId: request.params.id,
+          source: 'preflight',
+          operation: 'creator.run-stage',
+          stageId: request.query.stageId,
+          service,
+          issueService: options.issueService
+        });
+      }
+    }
+  );
+
+  server.post<{ Body: unknown }>('/creator/jobs', async (request, reply) => {
+    try {
+      if (!isCreateCreatorJobRequest(request.body)) {
+        throw new TypeError('Creator job request is invalid or mixes blank and preset fields');
+      }
+      const job = await service.createJob(request.body);
+      events.publish({
+        id: `snapshot:${job.revision}`,
+        jobId: job.id,
+        revision: job.revision,
+        kind: 'snapshot_changed',
+        payload: { revision: job.revision }
+      });
+      return reply.code(201).send({ job });
+    } catch (error) {
+      return sendCreatorError(reply, error);
+    }
+  });
+
+  server.get('/creator/jobs', async (request, reply) => {
+    try {
+      const query = readObject(request.query);
+      return {
+        jobs: service.listJobs(
+          query.projectId === undefined ? undefined : readString(query.projectId, 'projectId')
+        )
+      };
+    } catch (error) {
+      return sendCreatorError(reply, error);
+    }
+  });
+
+  server.get('/creator/jobs/:id', async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      const job = service.getJob(id);
+      if (job === undefined) {
+        return reply.code(404).send(apiError('creator_job_not_found', 'Creator job not found'));
+      }
+      return { job };
+    } catch (error) {
+      return sendCreatorError(reply, error);
+    }
+  });
+
+  server.get('/creator/jobs/:id/issues/stats', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      requireCreatorJob(service, id);
+      if (options.issueService === undefined) {
+        return reply.code(503).send(apiError(
+          'creator_job_control_unavailable',
+          'Creator issue service is unavailable'
+        ));
+      }
+      const query = readObject(request.query);
+      const to = readIssueStatTime(query.to, new Date());
+      const from = readIssueStatTime(query.from, new Date(Date.parse(to) - 24 * 60 * 60 * 1_000));
+      if (Date.parse(to) <= Date.parse(from)) throw new TypeError('to must be later than from');
+      if (Date.parse(to) - Date.parse(from) > 31 * 24 * 60 * 60 * 1_000) {
+        throw new TypeError('issue statistics range cannot exceed 31 days');
+      }
+      return { jobId: id, from, to, rows: options.issueService.stats(id, { from, to }) };
+    } catch (error) {
+      return sendCreatorError(reply, error);
+    }
+  });
+
+  server.get('/creator/jobs/:id/issues', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      requireCreatorJob(service, id);
+      if (options.issueService === undefined) {
+        return { issues: [], events: [] };
+      }
+      const query = readObject(request.query);
+      const cursor = query.cursor === undefined ? undefined : readString(query.cursor, 'cursor');
+      const limit = query.limit === undefined ? undefined : readQueryInteger(query.limit, 'limit');
+      const page = options.issueService.listEvents(id, { cursor, limit });
+      return {
+        issues: options.issueService.list(id),
+        events: page.events,
+        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor })
+      };
+    } catch (error) {
+      return sendCreatorError(reply, error);
+    }
+  });
+
+  server.post<{ Body: unknown }>('/creator/jobs/:id/issues/report', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      requireCreatorJob(service, id);
+      if (options.issueService === undefined) {
+        return reply.code(503).send(apiError(
+          'creator_job_control_unavailable',
+          'Creator issue service is unavailable'
+        ));
+      }
+      const report = readClientIssueReport(request.body);
+      const issue = options.issueService.capture({
+        jobId: id,
+        code: report.code,
+        source: report.source,
+        operation: report.operation,
+        stageId: report.stageId,
+        scopeKey: report.scopeKey,
+        fallbackMessage: report.fallbackMessage,
+        repairActions: [{ kind: 'focus-agent' }]
+      });
+      return reply.code(201).send({ clientIssueId: report.clientIssueId, issue });
+    } catch (error) {
+      return sendCreatorError(reply, error);
+    }
+  });
+
+  server.delete('/creator/jobs/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      const job = requireCreatorJob(service, id);
+      if (
+        options.agentService?.hasActiveRun(id) === true
+        || job.status === 'running'
+        || job.stages.some(stage => stage.status === 'queued' || stage.status === 'running')
+      ) {
+        throw new CreatorServiceError(
+          'creator_job_has_active_run',
+          'Creator job has an active run'
+        );
+      }
+      await options.agentService?.closeScope(id);
+      if (readOptionalQueryBoolean(readObject(request.query).deleteFiles, 'deleteFiles')) {
+        await deleteCreatorJobFiles(options.jobsRoot, job.id);
+      }
+      service.deleteJob(id);
+      return reply.code(204).send();
+    } catch (error) {
+      return sendCreatorError(reply, error);
+    }
+  });
+
+  server.post('/creator/jobs/:id/cancel', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      if (options.stageRunner === undefined) {
+        throw new CreatorServiceError(
+          'creator_job_control_unavailable',
+          'Creator job control is unavailable'
+        );
+      }
+      const job = requireCreatorJob(service, id);
+      const activeStages = job.stages.filter(stage => (
+        stage.status === 'queued' || stage.status === 'running'
+      ));
+      if (activeStages.length === 0) {
+        const latest = job.stages.at(-1);
+        if (latest?.status === 'canceled') {
+          return {
+            job,
+            stage: latest,
+            control: 'canceled'
+          };
+        }
+        throw new CreatorServiceError(
+          'creator_job_not_running',
+          'Creator job has no active stage'
+        );
+      }
+      const stages = options.stageRunner.cancelJob(id);
+      const stage = stages.at(-1);
+      if (stage === undefined) {
+        throw new CreatorServiceError(
+          'creator_job_not_running',
+          'Creator job has no active stage'
+        );
+      }
+      const latestJob = requireCreatorJob(service, id);
+      const canceling = stage.status === 'queued' || stage.status === 'running';
+      return reply.code(canceling ? 202 : 200).send({
+        job: latestJob,
+        stage,
+        stages,
+        control: canceling ? 'canceling' : 'canceled'
+      });
+    } catch (error) {
+      return sendCreatorError(reply, error);
+    }
+  });
+
+  server.post('/creator/jobs/:id/resume', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      if (options.stageRunner === undefined) {
+        throw new CreatorServiceError(
+          'creator_job_control_unavailable',
+          'Creator job control is unavailable'
+        );
+      }
+      let job = requireCreatorJob(service, id);
+      const latest = job.stages.at(-1);
+      if (latest !== undefined && isAlreadyResumed(job, latest)) {
+        return {
+          job,
+          stage: latest,
+          control: 'resumed'
+        };
+      }
+      if (latest === undefined || (latest.status !== 'canceled' && latest.status !== 'interrupted')) {
+        throw new CreatorServiceError(
+          'creator_job_not_resumable',
+          'Creator job has no canceled or interrupted stage to resume'
+        );
+      }
+      if (options.preflight !== undefined) {
+        const stage = service.templates.get(job.templateId, job.templateVersion).stages.find(candidate => candidate.id === latest.stageId);
+        if (stage === undefined) throw new CreatorServiceError('creator_stage_not_found', 'Creator stage was not found');
+        const preflight = await options.preflight.check(job, stage, {
+          ...(typeof latest.progress.inputResultVersion === 'number'
+            ? { inputResultVersion: latest.progress.inputResultVersion }
+            : {})
+        });
+        if (!preflight.canStart) throw new CreatorPreflightError(preflight);
+      }
+      if (job.templateId === 'video-translation' && options.videoTranslationWorkflow !== undefined) {
+        try {
+          await options.videoTranslationWorkflow.validateStage(job, latest.stageId);
+        } catch (error) {
+          publishSnapshotIfChanged(events, service, job);
+          throw error;
+        }
+        job = requireCreatorJob(service, id);
+      }
+      if (job.templateId === 'cover' && options.coverWorkflow !== undefined) {
+        try {
+          await options.coverWorkflow.validateStage(job, latest.stageId);
+        } catch (error) {
+          publishSnapshotIfChanged(events, service, job);
+          throw error;
+        }
+        job = requireCreatorJob(service, id);
+      }
+      if (job.templateId === 'stickman-video' && options.stickmanVideoWorkflow !== undefined) {
+        try {
+          await options.stickmanVideoWorkflow.validateResume(job, latest);
+        } catch (error) {
+          publishSnapshotIfChanged(events, service, job);
+          throw error;
+        }
+        job = requireCreatorJob(service, id);
+      }
+      const target = job.stages.at(-1);
+      if (target?.id !== latest.id || (target.status !== 'canceled' && target.status !== 'interrupted')) {
+        throw new CreatorServiceError(
+          'creator_job_not_resumable',
+          'Creator job state changed before it could be resumed'
+        );
+      }
+      const result = options.dispatcher.dispatch(id, {
+        action: 'run-stage',
+        expectedRevision: job.revision,
+        idempotencyKey: `resume:${target.id}`,
+        input: {
+          stageId: target.stageId,
+          ...(typeof target.progress.baseResultVersion === 'number'
+            ? { baseResultVersion: target.progress.baseResultVersion }
+            : {}),
+          ...(typeof target.progress.inputResultVersion === 'number'
+            ? { inputResultVersion: target.progress.inputResultVersion }
+            : {}),
+          ...(typeof target.progress.targetResultVersion === 'number'
+            ? { targetResultVersion: target.progress.targetResultVersion }
+            : {}),
+          ...(typeof target.progress.optionId === 'string'
+            ? { optionId: target.progress.optionId }
+            : {}),
+          ...(typeof target.progress.mediaType === 'string'
+            ? { mediaType: target.progress.mediaType }
+            : {}),
+          resumedFromStageRunId: target.id
+        }
+      }, 'user', {
+        scopeKey: target.scopeKey,
+        inputFingerprint: target.inputFingerprint,
+        resumedFromStageRunId: target.id,
+        ...(typeof target.progress.workflowParentStageRunId === 'string'
+          ? { parentStageRunId: target.progress.workflowParentStageRunId }
+          : {})
+      });
+      const resumedJob = requireCreatorJob(service, id);
+      const resumedStage = result.commandReceipt.stageRunId === null
+        ? undefined
+        : resumedJob.stages.find(stage => stage.id === result.commandReceipt.stageRunId);
+      if (resumedStage === undefined) {
+        throw new CreatorServiceError(
+          'creator_job_not_resumable',
+          'Creator job resume did not create a stage run'
+        );
+      }
+      return reply.code(202).send({
+        job: resumedJob,
+        stage: resumedStage,
+        control: 'resumed'
+      });
+    } catch (error) {
+      return sendCreatorError(reply, error);
+    }
+  });
+
+  server.get('/creator/jobs/:id/cover', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const job = service.getJob(id);
+    if (job === undefined) {
+      return reply.code(404).send(apiError('creator_job_not_found', 'Creator job not found'));
+    }
+    const cover = await options.projectCoverService?.resolve(job);
+    if (cover === undefined) {
+      return reply.code(404).send(apiError('creator_artifact_not_found', 'Creator project cover not found'));
+    }
+    return reply
+      .type(creatorArtifactContentType(cover.fileName))
+      .header('Cache-Control', 'private, max-age=86400')
+      .header('Content-Disposition', 'inline')
+      .send(createReadStream(cover.path));
+  });
+
+  server.get('/creator/jobs/:id/artifacts/:artifactId/content', async (request, reply) => {
+    const { id, artifactId } = request.params as { id: string; artifactId: string };
+    const job = service.getJob(id);
+    if (job === undefined) {
+      return reply.code(404).send(apiError('creator_job_not_found', 'Creator job not found'));
+    }
+    const artifact = job.artifacts.find(candidate => candidate.id === artifactId);
+    if (
+      artifact?.path === null
+      || artifact === undefined
+    ) {
+      return reply.code(404).send(apiError('creator_artifact_not_found', 'Creator artifact not found'));
+    }
+    try {
+      const info = await stat(artifact.path);
+      if (!info.isFile()) {
+        return reply.code(404).send(apiError('creator_artifact_not_found', 'Creator artifact file not found'));
+      }
+    } catch {
+      return reply.code(404).send(apiError('creator_artifact_not_found', 'Creator artifact file not found'));
+    }
+    const fileName = typeof artifact.metadata.fileName === 'string'
+      ? artifact.metadata.fileName
+      : basename(artifact.path);
+    return reply
+      .type(creatorArtifactContentType(fileName))
+      .header('Content-Disposition', creatorArtifactContentDisposition(fileName))
+      .send(createReadStream(artifact.path));
+  });
+
+  server.post<{ Body: unknown }>('/creator/jobs/:id/actions', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      const body = readObject(request.body);
+      const action = readString(body.action, 'action');
+      const actionInput = readObject(body.input) as CreatorActionRequest['input'];
+      const jobBeforeAction = service.getJob(id);
+      if (jobBeforeAction === undefined) {
+        throw new CreatorServiceError('creator_job_not_found', 'Creator job not found');
+      }
+      if (
+        (action === 'run-stage' || action === 'retry-stage')
+        && jobBeforeAction.templateId === 'video-translation'
+        && options.videoTranslationWorkflow !== undefined
+      ) {
+        const stageId = readString(actionInput.stageId, 'stageId');
+        try {
+          await options.videoTranslationWorkflow.validateStage(jobBeforeAction, stageId);
+        } catch (error) {
+          const latest = service.getJob(id);
+          if (latest !== undefined && latest.revision !== jobBeforeAction.revision) {
+            events.publish({
+              id: `snapshot:${latest.revision}`,
+              jobId: id,
+              revision: latest.revision,
+              kind: 'snapshot_changed',
+              payload: { revision: latest.revision }
+            });
+          }
+          if (
+            options.preflight !== undefined
+            && error instanceof VideoTranslationWorkflowError
+            && (error.code === 'creator_llm_config_missing' || error.code === 'creator_tts_config_missing')
+          ) {
+            const stageId = readString(actionInput.stageId, 'stageId');
+            const stage = service.templates.get(jobBeforeAction.templateId, jobBeforeAction.templateVersion).stages.find(candidate => candidate.id === stageId);
+            if (stage !== undefined) {
+              const preflight = await options.preflight.check(jobBeforeAction, stage, {
+                ...(typeof actionInput.inputResultVersion === 'number'
+                  ? { inputResultVersion: actionInput.inputResultVersion }
+                  : {})
+              });
+              if (!preflight.canStart) throw new CreatorPreflightError(preflight);
+            }
+          }
+          throw error;
+        }
+      }
+      if (
+        (action === 'run-stage' || action === 'retry-stage')
+        && jobBeforeAction.templateId === 'cover'
+        && options.coverWorkflow !== undefined
+      ) {
+        const stageId = readString(actionInput.stageId, 'stageId');
+        try {
+          await options.coverWorkflow.validateStage(jobBeforeAction, stageId);
+        } catch (error) {
+          const latest = service.getJob(id);
+          if (latest !== undefined && latest.revision !== jobBeforeAction.revision) {
+            events.publish({
+              id: `snapshot:${latest.revision}`,
+              jobId: id,
+              revision: latest.revision,
+              kind: 'snapshot_changed',
+              payload: { revision: latest.revision }
+            });
+          }
+          throw error;
+        }
+      }
+      if (action === 'run-stage' && options.preflight !== undefined) {
+        const stageId = readString(actionInput.stageId, 'stageId');
+        const stage = service.templates.get(jobBeforeAction.templateId, jobBeforeAction.templateVersion).stages.find(candidate => candidate.id === stageId);
+        if (stage === undefined) throw new CreatorServiceError('creator_stage_not_found', 'Creator stage was not found');
+        const preflight = await options.preflight.check(jobBeforeAction, stage, {
+          ...(typeof actionInput.inputResultVersion === 'number'
+            ? { inputResultVersion: actionInput.inputResultVersion }
+            : {})
+        });
+        if (!preflight.canStart) throw new CreatorPreflightError(preflight);
+      }
+      if (
+        (action === 'run-stage' || action === 'retry-stage')
+        && jobBeforeAction.templateId === 'stickman-video'
+        && options.stickmanVideoWorkflow !== undefined
+      ) {
+        const stageId = readString(actionInput.stageId, 'stageId');
+        try {
+          await options.stickmanVideoWorkflow.validateStage(
+            jobBeforeAction,
+            stageId,
+            typeof actionInput.scopeKey === 'string' ? actionInput.scopeKey : null
+          );
+        } catch (error) {
+          publishSnapshotIfChanged(events, service, jobBeforeAction);
+          throw error;
+        }
+      }
+      const expectedRevision = readInteger(body.expectedRevision, 'expectedRevision');
+      const result = await options.dispatcher.dispatchAsync(id, {
+        idempotencyKey: typeof body.idempotencyKey === 'string'
+          ? body.idempotencyKey
+          : fallbackIdempotencyKey(id, action, expectedRevision, actionInput),
+        action,
+        expectedRevision,
+        input: actionInput
+      }, 'user');
+      const repairIssueId = typeof body.repairIssueId === 'string' ? body.repairIssueId : undefined;
+      if (repairIssueId !== undefined) {
+        const stageRunId = result.commandReceipt.stageRunId;
+        if (stageRunId === null || (action !== 'run-stage' && action !== 'retry-stage')) {
+          throw new TypeError('repairIssueId requires a stage retry action');
+        }
+        options.issueService?.beginResolution({
+          jobId: id,
+          issueId: repairIssueId,
+          resolutionAttemptId: stageRunId,
+          associationKind: 'stage-run',
+          associationId: stageRunId,
+          stageRunId
+        });
+      }
+      if (
+        options.stickmanVideoWorkflow !== undefined
+        && jobBeforeAction.templateId === 'stickman-video'
+        && action === 'retry-stage'
+      ) {
+        await options.stickmanVideoWorkflow.reconcile(result.job);
+        return { ...result, job: service.getJob(id) ?? result.job };
+      }
+      if (
+        options.videoTranslationWorkflow !== undefined
+        && shouldReconcileVideoTranslation(jobBeforeAction, result.job)
+      ) {
+        await options.videoTranslationWorkflow.reconcile(result.job);
+        return {
+          ...result,
+          job: service.getJob(id) ?? result.job
+        };
+      }
+      return result;
+    } catch (error) {
+      return sendCreatorError(reply, error, {
+        jobId: id,
+        source: error instanceof CreatorPreflightError ? 'preflight' : 'api',
+        operation: 'creator.action',
+        service,
+        issueService: options.issueService
+      });
+    }
+  });
+
+  server.post<{ Body: unknown }>('/creator/jobs/:id/agent-turns', async (request, reply) => {
+    if (options.agentService === undefined) {
+      return reply.code(503).send(apiError('creator_agent_unavailable', 'Creator Agent is not ready'));
+    }
+    try {
+      const { id } = request.params as { id: string };
+      const body = readObject(request.body);
+      const sandbox = readCreatorAgentSandbox(body.sandbox);
+      const result = await options.agentService.runTurn(id, {
+        message: readString(body.message, 'message'),
+        ...(typeof body.clientMessageId === 'string'
+          ? { clientMessageId: body.clientMessageId }
+          : {}),
+        ...(sandbox === undefined ? {} : { sandbox }),
+        selection: body.selection as never,
+        ...(typeof body.focusedIssueId === 'string'
+          ? { focusedIssueId: body.focusedIssueId }
+          : {})
+      });
+      return result;
+    } catch (error) {
+      const { id } = request.params as { id: string };
+      return sendCreatorError(reply, error, {
+        jobId: id,
+        source: 'agent',
+        operation: 'creator.agent-turn',
+        service,
+        issueService: options.issueService
+      });
+    }
+  });
+
+  const readAgentTimeline = async (request: { params: unknown }): Promise<CreatorAgentHistoryResponse> => {
+    const { id } = request.params as { id: string };
+    return publicAgentTimeline(
+      options.agentService?.getTimeline(id) ?? emptyAgentTimeline()
+    );
+  };
+  server.get('/creator/jobs/:id/agent-history', readAgentTimeline);
+  server.get('/creator/jobs/:id/agent-timeline', readAgentTimeline);
+
+  server.post('/creator/jobs/:id/agent-interrupt', async (request, reply) => {
+    if (options.agentService === undefined) {
+      return reply.code(503).send(apiError('creator_agent_unavailable', 'Creator Agent is not ready'));
+    }
+    const { id } = request.params as { id: string };
+    const interrupted = options.agentService.interrupt(id);
+    return interrupted
+      ? reply.code(202).send({ interrupted: true })
+      : reply.code(409).send(apiError('creator_agent_not_running', 'Creator Agent has no active turn'));
+  });
+
+  server.post<{ Body: unknown }>('/creator/jobs/:id/agent-steer', async (request, reply) => {
+    if (options.agentService === undefined) {
+      return reply.code(503).send(apiError('creator_agent_unavailable', 'Creator Agent is not ready'));
+    }
+    try {
+      const { id } = request.params as { id: string };
+      const body = readObject(request.body);
+      const turn = await options.agentService.steer(id, {
+        message: readString(body.message, 'message'),
+        ...(typeof body.clientMessageId === 'string'
+          ? { clientMessageId: body.clientMessageId }
+          : {})
+      });
+      return { turn };
+    } catch (error) {
+      const { id } = request.params as { id: string };
+      return sendCreatorError(reply, error, {
+        jobId: id,
+        source: 'agent',
+        operation: 'creator.agent-steer',
+        service,
+        issueService: options.issueService
+      });
+    }
+  });
+
+  server.post<{ Body: unknown }>(
+    '/creator/jobs/:id/agent-approvals/:approvalId',
+    async (request, reply) => {
+      if (options.agentService === undefined) {
+        return reply.code(503).send(apiError('creator_agent_unavailable', 'Creator Agent is not ready'));
+      }
+      try {
+        const { approvalId } = request.params as { id: string; approvalId: string };
+        const body = readObject(request.body);
+        const decision = readApprovalDecision(body.decision);
+        const approval = options.agentService.respondApproval(
+          approvalId,
+          decision,
+          readInteger(body.processGeneration, 'processGeneration')
+        );
+        if (approval.status === 'expired') {
+          return reply.code(409).send(apiError(
+            'creator_approval_expired',
+            'Creator Agent approval is no longer active',
+            { approvalId: approval.id, processGeneration: approval.processGeneration }
+          ));
+        }
+        return { approval };
+      } catch (error) {
+        return sendCreatorError(reply, error);
+      }
+    }
+  );
+
+  server.get('/creator/jobs/:id/events', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const job = service.getJob(id);
+    if (job === undefined) {
+      return reply.code(404).send(apiError('creator_job_not_found', 'Creator job not found'));
+    }
+    for (const [header, value] of Object.entries(reply.getHeaders())) {
+      if (value !== undefined) reply.raw.setHeader(header, value);
+    }
+    reply.raw.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive'
+    });
+    const query = readObject(request.query);
+    const cursor = typeof query.cursor === 'string'
+      ? query.cursor
+      : readLastEventId(request.headers['last-event-id']);
+    const sent = new Set<string>();
+    const pending: CreatorEventEnvelope[] = [];
+    let replaying = true;
+    const writeEvent = (event: CreatorEventEnvelope) => {
+      if (sent.has(event.id) || reply.raw.destroyed || reply.raw.writableEnded) return;
+      sent.add(event.id);
+      reply.raw.write(formatSseEvent({ id: event.id, event: event.kind, data: event }));
+    };
+    const unsubscribe = events.subscribe(id, event => {
+      if (replaying) pending.push(event);
+      else writeEvent(event);
+    });
+    const persistent = persistentCreatorEvents(
+      job,
+      options.agentService?.listEvents(id) ?? []
+    );
+    if (cursor === undefined) {
+      writeEvent(snapshotEvent(job));
+    } else {
+      const cursorIndex = persistent.findIndex(event => event.id === cursor);
+      if (cursorIndex < 0) {
+        writeEvent({
+          ...snapshotEvent(job),
+          id: `reset:${job.revision}`,
+          payload: { revision: job.revision, reset: true }
+        });
+      } else {
+        for (const event of persistent.slice(cursorIndex + 1)) {
+          if (
+            event.revision === job.revision
+            && event.kind !== 'snapshot_changed'
+            && event.kind !== 'issue_changed'
+          ) continue;
+          writeEvent(event);
+        }
+      }
+    }
+    replaying = false;
+    for (const event of pending) writeEvent(event);
+    const heartbeat = setInterval(() => {
+      if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.write(': heartbeat\n\n');
+    }, options.sseHeartbeatMs ?? 15_000);
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    request.raw.on('close', cleanup);
+    reply.raw.on('close', cleanup);
+    return reply;
+  });
+}
+
+function contentTypeForPresetAsset(fileName: string): string {
+  const extension = extname(fileName).toLowerCase();
+  if (extension === '.mp4') return 'video/mp4';
+  if (extension === '.png') return 'image/png';
+  if (extension === '.webp') return 'image/webp';
+  return 'image/jpeg';
+}
+
+function parseByteRange(
+  value: string | undefined,
+  size: number
+): { start: number; end: number } | undefined {
+  if (value === undefined) return undefined;
+  const match = /^bytes=(\d+)-(\d*)$/.exec(value);
+  if (match === null) return undefined;
+  const start = Number(match[1]);
+  const requestedEnd = match[2] === '' ? size - 1 : Number(match[2]);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd)) return undefined;
+  if (start < 0 || start >= size || requestedEnd < start) return undefined;
+  return { start, end: Math.min(requestedEnd, size - 1) };
+}
+
+function emptyAgentTimeline(): CreatorAgentHistoryResponse {
+  return {
+    session: null,
+    turns: [],
+    items: [],
+    approvals: [],
+    lastEventSequence: 0
+  };
+}
+
+function publicAgentTimeline(
+  timeline: CreatorAgentHistoryResponse
+): CreatorAgentHistoryResponse {
+  return {
+    ...timeline,
+    items: timeline.items
+      .filter(item => ['assistant_message', 'tool_call', 'tool_result', 'error'].includes(item.kind))
+      .map(publicAgentItem)
+  };
+}
+
+function publicAgentItem(item: CreatorAgentItem): CreatorAgentItem {
+  const { text: _text, toolName, data, ...rest } = item;
+  const visibleToolName = toolName ?? toolNameFromData(data);
+  const visibleData: Record<string, CreatorJson> = {};
+  for (const key of [
+    'type',
+    'server',
+    'tool',
+    'name',
+    'status',
+    'readOnlyHint',
+    'durationMs'
+  ]) {
+    const value = data[key];
+    if (
+      value === null
+      || typeof value === 'string'
+      || typeof value === 'number'
+      || typeof value === 'boolean'
+    ) visibleData[key] = value;
+  }
+  return {
+    ...rest,
+    ...(visibleToolName === undefined ? {} : { toolName: visibleToolName }),
+    ...((item.kind === 'assistant_message' || item.kind === 'error') && item.text !== undefined
+      ? { text: item.text.slice(0, item.kind === 'assistant_message' ? 100_000 : 1_000) }
+      : {}),
+    data: visibleData
+  };
+}
+
+function toolNameFromData(data: Record<string, CreatorJson>): string | undefined {
+  const tool = typeof data.tool === 'string' ? data.tool : undefined;
+  if (tool !== undefined) {
+    return typeof data.server === 'string' && data.server.length > 0
+      ? `${data.server}.${tool}`
+      : tool;
+  }
+  return typeof data.name === 'string' && data.name.length > 0
+    ? data.name
+    : undefined;
+}
+
+function persistentCreatorEvents(
+  job: CreatorJob,
+  agentEvents: CreatorAgentEvent[]
+): CreatorEventEnvelope[] {
+  const events: CreatorEventEnvelope[] = [
+    ...job.activities.map(activity => ({
+      id: `activity:${activity.id}`,
+      jobId: job.id,
+      revision: activity.revision,
+      kind: 'activity_changed' as const,
+      payload: creatorPayload({ activity }),
+      createdAt: activity.createdAt
+    })),
+    ...job.stages.map(stage => ({
+      id: creatorStageEventId(stage),
+      jobId: job.id,
+      revision: job.revision,
+      kind: 'stage_progress' as const,
+      payload: creatorPayload({ stage }),
+      createdAt: stage.finishedAt ?? stage.startedAt ?? job.updatedAt
+    })),
+    ...agentEvents.map(event => ({
+      id: `agent:${event.sequence}`,
+      jobId: job.id,
+      revision: job.revision,
+      kind: creatorAgentEventKind(event),
+      payload: creatorPayload({ event }),
+      createdAt: event.createdAt
+    })),
+    ...(job.issues ?? []).map(issue => ({
+      id: creatorIssueEventId(issue),
+      jobId: job.id,
+      revision: job.revision,
+      kind: 'issue_changed' as const,
+      payload: creatorPayload({ issue }),
+      createdAt: issue.lastOccurredAt
+    })),
+    snapshotEvent(job)
+  ];
+  return events.sort((left, right) => (
+    left.createdAt.localeCompare(right.createdAt)
+    || left.revision - right.revision
+    || left.id.localeCompare(right.id)
+  ));
+}
+
+function snapshotEvent(job: CreatorJob): CreatorEventEnvelope {
+  return {
+    id: `snapshot:${job.revision}`,
+    jobId: job.id,
+    revision: job.revision,
+    kind: 'snapshot_changed',
+    payload: { revision: job.revision },
+    createdAt: job.updatedAt
+  };
+}
+
+function creatorPayload(value: unknown): Record<string, CreatorJson> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, CreatorJson>;
+}
+
+function readLastEventId(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function readApprovalDecision(value: unknown): CreatorAgentApprovalDecisionRequest['decision'] {
+  if (value === 'approved' || value === 'rejected' || value === 'canceled') return value;
+  throw new TypeError('decision must be approved, rejected or canceled');
+}
+
+function readCreatorAgentSandbox(
+  value: unknown
+): CreatorAgentTurnRequest['sandbox'] | undefined {
+  if (value === undefined) return undefined;
+  if (value === 'workspace-write' || value === 'danger-full-access') return value;
+  throw new TypeError('sandbox must be workspace-write or danger-full-access');
+}
+
+type CreatorErrorContext = {
+  jobId: string;
+  source: IssueSource;
+  operation: string;
+  stageId?: string;
+  scopeKey?: string;
+  service: CreatorService;
+  issueService?: CreatorIssueService;
+  existingIssue?: OpenCreatorIssue;
+};
+
+function sendCreatorError(reply: FastifyReply, error: unknown, context?: CreatorErrorContext) {
+  const issue = context?.existingIssue ?? captureIssueForError(error, context);
+  const response = (
+    code: RuntimeErrorCode,
+    message: string,
+    details?: Record<string, unknown>
+  ) => apiError(code, message, details, issue);
+  if (error instanceof CreatorPreflightError) {
+    return reply.code(400).send({
+      error: {
+        ...response(error.code as RuntimeErrorCode, error.message).error,
+        preflight: error.result
+      }
+    });
+  }
+  if (error instanceof StickmanVisualAssetError) {
+    const status = error.code.endsWith('_not_found') ? 404 : 422;
+    return reply.code(status).send(response(error.code as RuntimeErrorCode, error.message));
+  }
+  if (error instanceof CreatorRepositoryDataError) {
+    return reply.code(500).send(response('creator_data_corrupt', error.message));
+  }
+  if (error instanceof CreatorArtifactImportError) {
+    return reply.code(error.statusCode)
+      .send(response(error.code, error.message));
+  }
+  if (error instanceof CreatorReferenceImageUploadError) {
+    return reply.code(error.statusCode)
+      .send(response(error.code as RuntimeErrorCode, error.message));
+  }
+  if (error instanceof CreatorSourceUploadError) {
+    return reply.code(error.statusCode)
+      .send(response(error.code as RuntimeErrorCode, error.message));
+  }
+  if (error instanceof CreatorDocumentUploadError) {
+    return reply.code(error.statusCode)
+      .send(response(error.code as RuntimeErrorCode, error.message));
+  }
+  if (error instanceof CreatorCommandError) {
+    const status = error.code === 'creator_job_not_found'
+      ? 404
+      : error.code === 'creator_revision_conflict'
+        || error.code === 'creator_idempotency_key_reused'
+        ? 409
+        : 400;
+    return reply.code(status).send(response(error.code as RuntimeErrorCode, error.message, {
+      ...(error.latestRevision === undefined ? {} : { latestRevision: error.latestRevision })
+    }));
+  }
+  if (error instanceof CreatorServiceError) {
+    const status = error.code === 'creator_job_not_found'
+      ? 404
+      : error.code === 'creator_job_control_unavailable'
+        ? 503
+      : error.code === 'creator_agent_unavailable'
+        ? 503
+      : error.code === 'creator_agent_steer_unavailable'
+        || error.code === 'creator_agent_not_running'
+        || error.code === 'creator_job_has_active_run'
+        || error.code === 'creator_job_not_running'
+        || error.code === 'creator_job_not_resumable'
+        ? 409
+      : error.code === 'creator_approval_not_found'
+        ? 404
+      : error.code === 'creator_revision_conflict'
+        || error.code === 'creator_idempotency_key_reused'
+        ? 409
+        : 400;
+    return reply.code(status).send(response(error.code as RuntimeErrorCode, error.message, {
+      ...(error.latestRevision === undefined ? {} : { latestRevision: error.latestRevision })
+    }));
+  }
+  if (error instanceof ZodError || error instanceof TypeError) {
+    return reply.code(400).send(response('VALIDATION_FAILED', error.message));
+  }
+  if (error instanceof VideoTranslationWorkflowError) {
+    return reply.code(error.code === 'unsupported_source' ? 422 : 400)
+      .send(response(error.code as RuntimeErrorCode, error.message));
+  }
+  if (error instanceof CoverWorkflowError) {
+    const status = error.code === 'unsupported_source'
+      ? 422
+      : error.code === 'unsupported_capability'
+        ? 409
+        : 400;
+    return reply.code(status)
+      .send(response(error.code as RuntimeErrorCode, error.message));
+  }
+  throw error;
+}
+
+function captureIssueForError(
+  error: unknown,
+  context: CreatorErrorContext | undefined
+): OpenCreatorIssue | undefined {
+  const attachedIssue = typeof error === 'object' && error !== null
+    ? (error as { issue?: unknown }).issue
+    : undefined;
+  if (isOpenCreatorIssue(attachedIssue)) return attachedIssue;
+  if (
+    context === undefined
+    || context.issueService === undefined
+    || context.service.getJob(context.jobId) === undefined
+    || error instanceof CreatorRepositoryDataError
+  ) return undefined;
+  const code = errorCodeForIssue(error);
+  if (code === 'creator_job_not_found') return undefined;
+  const retryOperation = context.source === 'upload'
+    ? [{
+        kind: 'retry-operation' as const,
+        operationId: context.operation,
+        requiresConfirmation: false,
+        risk: 'normal' as const
+      }]
+    : context.source === 'preflight' || context.source === 'stage'
+      ? [{
+          kind: 'retry-operation' as const,
+          operationId: 'creator.retry-stage',
+          requiresConfirmation: false,
+          risk: 'normal' as const
+        }]
+      : [];
+  try {
+    return context.issueService.capture({
+      jobId: context.jobId,
+      code,
+      source: context.source,
+      operation: context.operation,
+      stageId: context.stageId,
+      scopeKey: context.scopeKey,
+      fallbackMessage: fallbackForIssueSource(context.source),
+      publicFacts: publicFactsFromFailure(error),
+      technicalDetail: error instanceof Error ? error.message : undefined,
+      retryable: retryOperation.length > 0,
+      repairActions: [...retryOperation, { kind: 'focus-agent' }]
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function errorCodeForIssue(error: unknown): string {
+  if (
+    typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && typeof (error as { code?: unknown }).code === 'string'
+  ) return (error as { code: string }).code;
+  if (error instanceof ZodError || error instanceof TypeError) return 'VALIDATION_FAILED';
+  return 'creator_operation_failed';
+}
+
+function fallbackForIssueSource(source: IssueSource): string {
+  if (source === 'upload') return 'The upload did not complete. Check the file and try again.';
+  if (source === 'preflight') return 'Prerequisites are not met. Resolve the reported issues and try again.';
+  if (source === 'provider') return 'The external service request failed. Check the configuration or try again later.';
+  if (source === 'agent') return 'The Agent operation did not complete. Ask the Agent for details.';
+  return 'The operation did not complete. Try again or ask the Agent.';
+}
+
+function requireCreatorJob(service: CreatorService, jobId: string): CreatorJob {
+  const job = service.getJob(jobId);
+  if (job === undefined) {
+    throw new CreatorServiceError('creator_job_not_found', 'Creator job not found');
+  }
+  return job;
+}
+
+function shouldReconcileVideoTranslation(before: CreatorJob, after: CreatorJob): boolean {
+  if (before.templateId !== 'video-translation' || after.templateId !== 'video-translation') {
+    return false;
+  }
+  const previousNeedsInput = before.state.needsInput;
+  return (
+    previousNeedsInput !== null
+    && typeof previousNeedsInput === 'object'
+    && !Array.isArray(previousNeedsInput)
+    && previousNeedsInput.code === 'creator_tts_config_missing'
+    && after.state.dubbing !== true
+    && after.state.needsInput === undefined
+  );
+}
+
+function latestStageMatching(
+  job: CreatorJob,
+  predicate: (stage: CreatorStageRun) => boolean
+): CreatorStageRun | undefined {
+  return [...job.stages].reverse().find(predicate);
+}
+
+function isAlreadyResumed(job: CreatorJob, latest: CreatorStageRun): boolean {
+  if (
+    latest.status === 'canceled'
+    || latest.status === 'interrupted'
+    || latest.status === 'failed'
+  ) return false;
+  return typeof latest.progress.resumedFromStageRunId === 'string'
+    && job.stages.some(stage => stage.id === latest.progress.resumedFromStageRunId);
+}
+
+function publishSnapshotIfChanged(
+  events: CreatorEventHub,
+  service: CreatorService,
+  before: CreatorJob
+): void {
+  const latest = service.getJob(before.id);
+  if (latest === undefined || latest.revision === before.revision) return;
+  events.publish({
+    id: `snapshot:${latest.revision}`,
+    jobId: latest.id,
+    revision: latest.revision,
+    kind: 'snapshot_changed',
+    payload: { revision: latest.revision }
+  });
+}
+
+function fallbackIdempotencyKey(
+  jobId: string,
+  action: string,
+  expectedRevision: number,
+  input: CreatorActionRequest['input']
+): string {
+  return `legacy_${createHash('sha256')
+    .update(JSON.stringify({ jobId, action, expectedRevision, input }))
+    .digest('hex')}`;
+}
+
+function readObject(value: unknown): Record<string, unknown> {
+  if (value === null || Array.isArray(value) || typeof value !== 'object') {
+    throw new TypeError('value must be an object');
+  }
+  return value as Record<string, unknown>;
+}
+
+function readString(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new TypeError(`${field} must be a non-empty string`);
+  }
+  return value;
+}
+
+function readClientIssueReport(value: unknown): CreatorClientIssueReportRequest {
+  const record = readObject(value);
+  const allowed = new Set([
+    'clientIssueId', 'code', 'source', 'operation', 'stageId', 'scopeKey', 'fallbackMessage'
+  ]);
+  if (Object.keys(record).some(key => !allowed.has(key))) {
+    throw new TypeError('client issue report contains unsupported fields');
+  }
+  const source = readString(record.source, 'source');
+  if (!['upload', 'preflight', 'agent', 'client'].includes(source)) {
+    throw new TypeError('source is not reportable by a client');
+  }
+  const optional = (field: string, max: number) => {
+    const raw = record[field];
+    if (raw === undefined) return undefined;
+    const text = readString(raw, field);
+    if (text.length > max) throw new TypeError(`${field} is too long`);
+    return text;
+  };
+  const clientIssueId = readString(record.clientIssueId, 'clientIssueId');
+  const code = readString(record.code, 'code');
+  const fallbackMessage = readString(record.fallbackMessage, 'fallbackMessage');
+  if (clientIssueId.length > 160 || code.length > 160 || fallbackMessage.length > 500) {
+    throw new TypeError('client issue report field is too long');
+  }
+  return {
+    clientIssueId,
+    code,
+    source: source as CreatorClientIssueReportRequest['source'],
+    fallbackMessage,
+    ...(optional('operation', 160) === undefined ? {} : { operation: optional('operation', 160)! }),
+    ...(optional('stageId', 160) === undefined ? {} : { stageId: optional('stageId', 160)! }),
+    ...(optional('scopeKey', 200) === undefined ? {} : { scopeKey: optional('scopeKey', 200)! })
+  };
+}
+
+function readIssueStatTime(value: unknown, fallback: Date): string {
+  if (value === undefined) return fallback.toISOString();
+  const text = readString(value, 'issue statistics time');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(text) || Number.isNaN(Date.parse(text))) {
+    throw new TypeError('issue statistics time must be UTC ISO-8601');
+  }
+  return new Date(text).toISOString();
+}
+
+function readUploadRepairContext(
+  query: Record<string, unknown>
+): { issueId: string; attemptId: string } | undefined {
+  if (query.repairIssueId === undefined && query.resolutionAttemptId === undefined) return undefined;
+  const issueId = readString(query.repairIssueId, 'repairIssueId');
+  const attemptId = readString(query.resolutionAttemptId, 'resolutionAttemptId');
+  if (issueId.length > 160 || !/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(attemptId)) {
+    throw new TypeError('upload repair context is invalid');
+  }
+  return { issueId, attemptId };
+}
+
+function readInteger(value: unknown, field: string): number {
+  if (!Number.isInteger(value) || (value as number) < 0) {
+    throw new TypeError(`${field} must be a non-negative integer`);
+  }
+  return value as number;
+}
+
+function readQueryInteger(value: unknown, field: string): number {
+  const parsed = typeof value === 'string' && /^\d+$/.test(value)
+    ? Number(value)
+    : value;
+  return readInteger(parsed, field);
+}
+
+function readOptionalQueryBoolean(value: unknown, field: string): boolean {
+  if (value === undefined || value === 'false' || value === false) return false;
+  if (value === 'true' || value === true) return true;
+  throw new TypeError(`${field} must be true or false`);
+}
+
+async function deleteCreatorJobFiles(jobsRoot: string, jobId: string): Promise<void> {
+  if (!/^creator_job_[A-Za-z0-9_-]+$/.test(jobId)) {
+    throw new TypeError('Creator job id is invalid');
+  }
+  const root = resolve(jobsRoot);
+  const target = resolve(root, jobId);
+  if (!target.startsWith(`${root}${sep}`)) {
+    throw new TypeError('Creator job file path is invalid');
+  }
+  await rm(target, { recursive: true, force: true });
+}
+
+function isReadable(value: unknown): value is Readable {
+  return typeof (value as { pipe?: unknown } | null)?.pipe === 'function';
+}
+
+function creatorArtifactContentType(fileName: string): string {
+  const extension = extname(fileName).toLowerCase();
+  if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg';
+  if (extension === '.png') return 'image/png';
+  if (extension === '.webp') return 'image/webp';
+  if (extension === '.srt') return 'application/x-subrip; charset=utf-8';
+  if (extension === '.md') return 'text/markdown; charset=utf-8';
+  if (extension === '.mp4') return 'video/mp4';
+  if (extension === '.webm') return 'video/webm';
+  if (extension === '.mp3') return 'audio/mpeg';
+  if (extension === '.wav') return 'audio/wav';
+  if (extension === '.m4a') return 'audio/mp4';
+  if (extension === '.md' || extension === '.markdown') return 'text/markdown; charset=utf-8';
+  if (extension === '.txt') return 'text/plain; charset=utf-8';
+  if (extension === '.json') return 'application/json; charset=utf-8';
+  if (extension === '.pdf') return 'application/pdf';
+  if (extension === '.html' || extension === '.htm') return 'text/html; charset=utf-8';
+  return 'application/octet-stream';
+}
+
+function creatorArtifactContentDisposition(fileName: string): string {
+  const encoded = encodeURIComponent(fileName).replace(
+    /['()*]/g,
+    character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+  return `attachment; filename="artifact"; filename*=UTF-8''${encoded}`;
+}

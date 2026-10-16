@@ -1,0 +1,965 @@
+import type {
+  CreatorActivity,
+  CreatorAgentApproval,
+  CreatorAgentItem,
+  CreatorAgentTurn,
+  CreatorJob,
+  OpenCreatorIssue,
+  CreatorStageRun
+} from '@opencreator/protocol';
+import {
+  CheckCircle2,
+  CircleDot,
+  LoaderCircle,
+  MessageSquareText,
+  Play,
+  RefreshCw,
+  ServerOff,
+  Sparkles,
+  Square,
+  XCircle
+} from 'lucide-react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import OpenCreatorMark from '../../components/brand/OpenCreatorMark.js';
+import { MarkdownRenderer } from '../../components/markdown/MarkdownRenderer.js';
+import { useLocalizedCopy } from '../../i18n/useLocalizedCopy.js';
+import { useAppLanguage } from '../../i18n/LanguageProvider.js';
+import { issueConversationText, issueDiagnosticText } from '../issues/issue-catalog.js';
+import { OriginalErrorDetails } from '../issues/OriginalErrorDetails.js';
+import { creatorPreflightMessage } from './creator-preflight-copy.js';
+import ToolAgentComposer, { type ToolAgentPermission } from './ToolAgentComposer.js';
+import {
+  creatorSystemIssueText,
+  creatorPanelAdapterFor,
+  type CreatorPanelLocalize,
+  type CreatorPanelAdapter,
+  type CreatorStageProgressView
+} from './creator-panel-adapters.js';
+import { useOptionalCreatorSession } from './creator-session-store.js';
+import { RuntimeRecoveryNotice, useRuntimeRecovery } from '../../runtime/runtime-recovery.js';
+
+export type CreatorPanelQuickAction = {
+  id: string;
+  label: string;
+  kind: 'action' | 'agent';
+  prompt?: string;
+  onAction?(): void;
+  disabled?: boolean;
+};
+
+type SyncEvent = {
+  id: string;
+  actor: CreatorActivity['actor'];
+  action: string;
+  label: string;
+  fields: string[];
+  count: number;
+  createdAt: string;
+  stageId?: string;
+};
+
+type CollaborationMessage = {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  status: CreatorAgentTurn['status'] | CreatorAgentItem['status'];
+  createdAt: string;
+  source: 'agent' | 'diagnostic';
+};
+
+type CollaborationTimelineItem =
+  | {
+      id: string;
+      kind: 'message';
+      createdAt: string;
+      message: CollaborationMessage;
+    }
+  | {
+      id: string;
+      kind: 'activity';
+      createdAt: string;
+      event: SyncEvent;
+    }
+  | {
+      id: string;
+      kind: 'stage';
+      createdAt: string;
+      stage: CreatorStageRun;
+      actor: CreatorActivity['actor'];
+    }
+  | {
+      id: string;
+      kind: 'issue';
+      createdAt: string;
+      issue: OpenCreatorIssue;
+    };
+
+export default function CreatorCollaborationPanel(props: {
+  adapter: CreatorPanelAdapter;
+  stepLabel: string;
+  contextSummary: string;
+  taskSummary?: ReactNode;
+  promptHint?: string;
+  currentIssue?: string;
+  quickActions?: CreatorPanelQuickAction[];
+  onCancelTask?(): void;
+  onResumeTask?(): void;
+  taskControlPending?: 'canceling' | 'resuming';
+}) {
+  const l = useLocalizedCopy();
+  const session = useOptionalCreatorSession();
+  const runtimeRecovery = useRuntimeRecovery();
+  const connectionUnavailable = runtimeRecovery !== null && runtimeRecovery.state.status !== 'connected'
+    || session?.connection !== undefined && session.connection.status !== 'connected';
+  const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
+  const [permission, setPermission] = useState<ToolAgentPermission>('full-access');
+  const sendingRef = useRef(false);
+  const permissionSessionRef = useRef<string | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
+  const followTimelineRef = useRef(true);
+  const agentTurns = useMemo(() => session?.turns.filter(turn => (
+    (turn.role === 'user' || turn.role === 'assistant')
+    && (turn.content.trim().length > 0 || ['queued', 'running', 'waiting_approval'].includes(turn.status))
+  )) ?? [], [session?.turns]);
+  const conversationMessages = useMemo(
+    () => buildCollaborationMessages(agentTurns, session?.items ?? []),
+    [agentTurns, session?.items]
+  );
+  const syncEvents = useMemo(
+    () => buildSyncEvents(session?.job.activities ?? [], props.adapter, l),
+    [l, props.adapter, session?.job.activities]
+  );
+  const timelineItems = useMemo(
+    () => buildCollaborationTimeline(
+      session?.job,
+      session?.issues ?? [],
+      conversationMessages,
+      syncEvents,
+      props.adapter
+    ),
+    [conversationMessages, props.adapter, session?.issues, session?.job, syncEvents]
+  );
+  const pendingApprovals = useMemo(
+    () => session?.approvals.filter(approval => approval.status === 'pending') ?? [],
+    [session?.approvals]
+  );
+  const hasActiveStage = useMemo(
+    () => latestStageRuns(session?.job.stages ?? []).some(stage => (
+      stage.status === 'queued' || stage.status === 'running'
+    )),
+    [session?.job.stages]
+  );
+  const activeTaskStage = useMemo(
+    () => activeStageRun(session?.job.stages ?? []),
+    [session?.job.stages]
+  );
+  const latestTaskStage = session?.job.stages.at(-1);
+  const resumableTaskStage = activeTaskStage === undefined
+    && (latestTaskStage?.status === 'canceled' || latestTaskStage?.status === 'interrupted')
+    ? latestTaskStage
+    : undefined;
+  const showAgentWorking = (sending || session?.agentBusy === true)
+    && !hasActiveStage
+    && pendingApprovals.length === 0;
+
+  useEffect(() => {
+    const sessionId = session?.agentSession?.id;
+    if (sessionId === undefined || permissionSessionRef.current === sessionId) return;
+    permissionSessionRef.current = sessionId;
+    const sandbox = session?.agentSession?.sandbox;
+    if (sandbox === 'danger-full-access') setPermission('full-access');
+    if (sandbox === 'workspace-write') setPermission('approval');
+  }, [session?.agentSession?.id, session?.agentSession?.sandbox]);
+
+  useLayoutEffect(() => {
+    const list = messageListRef.current;
+    if (list !== null && followTimelineRef.current) list.scrollTop = list.scrollHeight;
+  }, [
+    timelineItems,
+    pendingApprovals.length,
+    session?.agentBusy,
+    showAgentWorking
+  ]);
+
+  async function send(message: string) {
+    const content = message.trim();
+    if (!content || session === null || sendingRef.current || connectionUnavailable) return;
+    sendingRef.current = true;
+    session.clearError();
+    setInput('');
+    setSending(true);
+    try {
+      if (session.job.id.startsWith('pending:') && session.focusedIssue !== null) {
+        session.askPendingIssue(content, session.focusedIssue);
+      } else if (session.agentBusy) await session.steerAgentTurn(content);
+      else await session.runAgentTurn(
+        content,
+        permission === 'full-access' ? 'danger-full-access' : 'workspace-write'
+      );
+    } catch (cause) {
+      session.clearError();
+      setInput(current => current.trim().length > 0 ? current : content);
+      throw cause;
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
+  }
+
+  function runQuickAction(action: CreatorPanelQuickAction) {
+    if (action.kind === 'action') {
+      action.onAction?.();
+      return;
+    }
+    if (action.prompt) void send(action.prompt).catch(() => undefined);
+  }
+
+  return (
+    <aside
+      className="creator-collaboration creator-collaboration-panel"
+      aria-label="OpenCreator"
+    >
+      <header className="creator-collaboration-header">
+        <span aria-hidden="true"><OpenCreatorMark size={18} /></span>
+        <div>
+          <h2>OpenCreator</h2>
+          <p>{l('正在协助：', 'Helping with: ')}{props.stepLabel}</p>
+        </div>
+        {session?.agentBusy ? (
+          <button
+            type="button"
+            onClick={() => void session.interruptAgentTurn().catch(() => undefined)}
+            aria-label={l('停止 Agent 对话', 'Stop Agent conversation')}
+            title={l('停止 Agent 对话', 'Stop Agent conversation')}
+          >
+            <Square size={15} fill="currentColor" aria-hidden="true" />
+          </button>
+        ) : null}
+      </header>
+
+      {props.taskSummary ? <div className="creator-collaboration-task-summary">{props.taskSummary}</div> : null}
+
+      {!props.taskSummary || props.currentIssue ? <div className="creator-collaboration-context">
+        <Sparkles size={14} strokeWidth={1.8} aria-hidden="true" />
+        <span>
+          <small>{l('当前任务', 'Current task')}</small>
+          <strong>{props.currentIssue ?? props.contextSummary}</strong>
+        </span>
+      </div> : null}
+
+      {session?.preflight !== null && session?.preflight !== undefined ? (
+        <section className="creator-collaboration-preflight" aria-label={l('启动前体检', 'Preflight check')}>
+          <strong>{l('启动前体检', 'Preflight check')}</strong>
+          <span>{session.preflight.executionMode === 'local'
+            ? l('本地服务', 'Local services')
+            : session.preflight.executionMode === 'remote'
+              ? l('远程服务', 'Remote services')
+              : l('本地 + 远程服务', 'Local + remote services')}</span>
+          {session.preflight.blocked.length > 0 ? (
+            <ul>
+              {session.preflight.blocked.map(item => (
+                <li key={item.id}>
+                  <span>{creatorPreflightMessage(item.id, l)}</span>
+                  <OriginalErrorDetails detail={`${item.title}: ${item.message}`} />
+                  {item.repair.deepLink === undefined ? null : (
+                    <a href={item.repair.deepLink}>{item.repair.deepLink.startsWith('#/settings') ? l('打开设置', 'Open settings') : l('查看详情', 'View details', 'Visa detaljer')}</a>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <span>{l('已通过，可以启动阶段。', 'Ready to start this stage.')}</span>
+          )}
+        </section>
+      ) : null}
+
+      <RuntimeRecoveryNotice session={session?.connection} onRetrySession={session?.reconnect} />
+      {session === null ? (
+        <div className="creator-collaboration-unavailable" role="alert">
+          <ServerOff size={16} aria-hidden="true" />
+          <p>{l('项目会话尚未初始化，请重新打开项目；这不代表本地服务已断开。', 'The project session is not initialized. Reopen the project; this does not mean the local Runtime is disconnected.')}</p>
+        </div>
+      ) : (
+        <>
+          <div
+            ref={messageListRef}
+            className="creator-collaboration-messages"
+            onScroll={event => {
+              const list = event.currentTarget;
+              followTimelineRef.current = list.scrollHeight - list.clientHeight - list.scrollTop <= 24;
+            }}
+            role="log"
+            aria-label={l('协作时间线', 'Collaboration timeline')}
+            aria-live="polite"
+          >
+            {timelineItems.length === 0 ? (
+              <div className="creator-collaboration-empty">
+                <MessageSquareText size={16} strokeWidth={1.7} aria-hidden="true" />
+                <span>{l('尚无协作记录', 'No collaboration activity yet')}</span>
+              </div>
+            ) : timelineItems.map(item => {
+              if (item.kind === 'message') {
+                return <CollaborationMessageView key={item.id} message={item.message} />;
+              }
+              if (item.kind === 'activity') {
+                return <CollaborationActivityView key={item.id} event={item.event} />;
+              }
+              if (item.kind === 'issue') {
+                return (
+                  <CollaborationIssueView
+                    key={item.id}
+                    issue={item.issue}
+                    onRetry={() => session.repairIssue(item.issue)}
+                    onFocus={() => {
+                      session.focusIssue(item.issue);
+                    }}
+                  />
+                );
+              }
+              return (
+                <CollaborationStageView
+                  key={item.id}
+                  stage={item.stage}
+                  actor={item.actor}
+                  adapter={props.adapter}
+                  onCancel={item.stage.id === activeTaskStage?.id
+                    ? props.onCancelTask
+                    : undefined}
+                  onResume={item.stage.id === resumableTaskStage?.id
+                    ? props.onResumeTask
+                    : undefined}
+                  controlPending={props.taskControlPending}
+                />
+              );
+            })}
+
+
+            {showAgentWorking ? (
+              <div
+                className="creator-collaboration-working"
+                role="status"
+                aria-label={l('Agent 正在工作', 'Agent is working')}
+              >
+                <span aria-hidden="true"><OpenCreatorMark size={14} /></span>
+                <LoaderCircle
+                  className="creator-collaboration-spin"
+                  size={16}
+                  strokeWidth={1.8}
+                  aria-hidden="true"
+                />
+              </div>
+            ) : null}
+
+            {pendingApprovals.map(approval => {
+              const copy = approvalDisplayCopy(approval.kind, l);
+              return (
+                <article className="creator-collaboration-approval" data-status={approval.status} key={approval.id}>
+                  <strong>{copy.title}</strong>
+                  <p>{copy.summary}</p>
+                  <div>
+                    <button type="button" onClick={() => void session.respondAgentApproval(approval.id, 'approved', approval.processGeneration).catch(() => undefined)}>
+                      {l('批准', 'Approve')}
+                    </button>
+                    <button type="button" onClick={() => void session.respondAgentApproval(approval.id, 'rejected', approval.processGeneration).catch(() => undefined)}>
+                      {l('拒绝', 'Reject')}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+
+          {(props.quickActions?.length ?? 0) > 0 ? (
+            <div className="creator-collaboration-suggestions" aria-label={l('快捷操作', 'Quick actions')}>
+              {props.quickActions!.map(action => (
+                <button
+                  type="button"
+                  data-kind={action.kind}
+                  key={action.id}
+                  disabled={action.disabled}
+                  onClick={() => runQuickAction(action)}
+                >
+                  {action.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          <ToolAgentComposer
+            value={input}
+            onChange={setInput}
+            onSubmit={() => void send(input).catch(() => undefined)}
+            showAttachments={false}
+            showPermission
+            showModel={false}
+            permission={permission}
+            permissionDisabled={session.agentBusy}
+            onPermissionChange={setPermission}
+            submitting={sending}
+            disabled={connectionUnavailable}
+            ariaLabel={l('告诉 Agent 你的要求', 'Tell the Agent your requirements')}
+            placeholder={session.agentBusy
+              ? l('补充当前任务的要求', 'Add guidance to the active task')
+              : props.promptHint ?? props.adapter.composerPlaceholder(l)}
+          />
+        </>
+      )}
+    </aside>
+  );
+}
+
+function CollaborationIssueView(props: {
+  issue: OpenCreatorIssue;
+  onRetry(): Promise<void>;
+  onFocus(): void;
+}) {
+  const l = useLocalizedCopy();
+  const { language } = useAppLanguage();
+  const copy = issueConversationText(props.issue, language);
+  const retryable = props.issue.stageId !== undefined
+    && props.issue.repairActions.some(action => (
+      action.kind === 'retry-operation'
+      && action.operationId === 'creator.retry-stage'
+    ));
+  return (
+    <article className="creator-collaboration-message creator-collaboration-issue" data-role="system" data-source="diagnostic" data-status={props.issue.status} data-issue-id={props.issue.id}>
+      <header>
+        <span aria-hidden="true"><OpenCreatorMark size={14} /></span>
+        <strong>OpenCreator</strong>
+        <small>{l('系统诊断', 'System diagnosis')}</small>
+      </header>
+      <div className="creator-collaboration-bubble">
+        <p>{copy.message}</p>
+        <OriginalErrorDetails detail={issueDiagnosticText(props.issue, language)} />
+        {props.issue.status === 'resolving' ? <p>{l('正在检查修复结果。', 'Checking the repair result.')}</p> : null}
+        {props.issue.status === 'resolved' ? <p>{l('这个问题已解决。', 'This issue has been resolved.')}</p> : null}
+      </div>
+      {props.issue.status === 'open' ? (
+        <div className="creator-collaboration-issue-actions">
+          <button type="button" onClick={props.onFocus} title={l('询问这个问题', 'Ask about this issue')} aria-label={l('询问这个问题', 'Ask about this issue')}>
+            <MessageSquareText size={15} aria-hidden="true" />
+          </button>
+          {retryable ? <button type="button" onClick={() => void props.onRetry().catch(() => undefined)} title={l('重试当前步骤', 'Retry this stage')} aria-label={l('重试当前步骤', 'Retry this stage')}><RefreshCw size={15} aria-hidden="true" /></button> : null}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function CollaborationMessageView(props: { message: CollaborationMessage }) {
+  const l = useLocalizedCopy();
+  const { message } = props;
+  return (
+    <article
+      className="creator-collaboration-message"
+      data-role={message.role}
+      data-source={message.source}
+      data-status={message.status}
+    >
+      {message.role !== 'user' ? (
+        <header>
+          <span aria-hidden="true"><OpenCreatorMark size={14} /></span>
+          <strong>OpenCreator</strong>
+          <small>{message.role === 'system' ? l('系统诊断', 'System diagnosis') : l('Agent 回复', 'Agent reply')}</small>
+        </header>
+      ) : null}
+      <div className="creator-collaboration-bubble">
+        <MarkdownRenderer
+          text={message.content}
+          variant={message.role === 'user' ? 'user' : 'assistant'}
+        />
+      </div>
+    </article>
+  );
+}
+
+function CollaborationActivityView(props: { event: SyncEvent }) {
+  const l = useLocalizedCopy();
+  const { event } = props;
+  return (
+    <article className="creator-collaboration-activity" data-actor={event.actor}>
+      <span aria-hidden="true"><CircleDot size={13} strokeWidth={1.8} /></span>
+      <div>
+        <header>
+          <strong>{actorLabel(event.actor, l)}</strong>
+          {event.count > 1 ? <small>{event.count} {l('次修改', 'changes')}</small> : null}
+        </header>
+        <p>{event.label}</p>
+        {event.fields.length > 0 ? <small>{event.fields.join(l('、', ', '))}</small> : null}
+      </div>
+    </article>
+  );
+}
+
+export function CreatorTaskProgressNotice(props: { stageId: string }) {
+  const localize = useLocalizedCopy();
+  const session = useOptionalCreatorSession();
+  const stage = activeStageRun((session?.job.stages ?? []).filter(run => run.stageId === props.stageId));
+  if (stage === undefined) return null;
+  const adapter = creatorPanelAdapterFor(session?.job.templateId ?? '');
+  const progress = adapter.readStageProgress(stage, localize);
+  const percent = progress.percent === null ? null : Math.max(0, Math.min(100, Math.round(progress.percent)));
+  return (
+    <section className="creator-task-progress-notice" role="status" aria-label={localize('任务进度', 'Task progress', 'Uppgiftsförlopp')}>
+      <div className="creator-task-progress-notice-heading">
+        {stageStatusIcon(stage)}
+        <strong>{stageProgressText(stage, progress, adapter, localize)}{percent === null ? '' : ` · ${percent}%`}</strong>
+      </div>
+      <CreatorStageProgressDetails stage={stage} progress={progress} />
+    </section>
+  );
+}
+
+function CreatorStageProgressDetails(props: { stage: CreatorStageRun; progress: CreatorStageProgressView }) {
+  const localize = useLocalizedCopy();
+  const session = useOptionalCreatorSession();
+  const { stage, progress } = props;
+  const active = stage.status === 'queued' || stage.status === 'running';
+  const showTiming = active && progress.showTiming === true;
+  const observedRef = useRef({ stageId: stage.id, progress: stage.progress, firstSeenAt: Date.now(), receivedAt: Date.now() });
+  if (observedRef.current.stageId !== stage.id) {
+    observedRef.current = { stageId: stage.id, progress: stage.progress, firstSeenAt: Date.now(), receivedAt: Date.now() };
+  } else if (observedRef.current.progress !== stage.progress) {
+    observedRef.current.progress = stage.progress;
+    observedRef.current.receivedAt = Date.now();
+  }
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!showTiming) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [showTiming, stage.id]);
+  if (!showTiming && !(active && progress.showMessage && progress.message)) return null;
+  const startedAt = Date.parse(stage.startedAt ?? '');
+  const elapsedSeconds = Math.max(0, Math.floor((now - (Number.isFinite(startedAt) ? startedAt : observedRef.current.firstSeenAt)) / 1_000));
+  const receivedSeconds = Math.max(0, Math.floor((now - observedRef.current.receivedAt) / 1_000));
+  const duration = `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, '0')}`;
+  const waitingForProvider = progress.phase === 'queued' || progress.phase === 'generating';
+  const disconnected = session?.connection !== undefined && session.connection.status !== 'connected';
+  const warning = !showTiming ? null : disconnected
+    ? localize('任务连接已中断，正在尝试恢复；恢复后会同步最新状态。', 'The task connection is interrupted. Reconnecting to receive the latest status.', 'Anslutningen till uppgiften har brutits. Återansluter för att hämta den senaste statusen.')
+    : waitingForProvider && receivedSeconds >= 30
+      ? localize('暂未收到新的生成状态，仍在等待服务商响应。', 'No new generation status has arrived yet. Waiting for the provider to respond.', 'Ingen ny genereringsstatus har kommit ännu. Väntar på svar från leverantören.')
+      : waitingForProvider && elapsedSeconds >= 120
+        ? localize('仍在等待服务商返回结果，生成时间由服务商决定。可以离开当前页面，任务会在后台继续。', 'Still waiting for the provider result. Generation time depends on the provider. You can leave this page; the task continues in the background.', 'Väntar fortfarande på leverantörens resultat. Genereringstiden beror på leverantören. Du kan lämna sidan; uppgiften fortsätter i bakgrunden.')
+        : null;
+  return (
+    <div className="creator-collaboration-stage-details">
+      {active && progress.showMessage && progress.message ? <p className="creator-collaboration-stage-message" role="status">{progress.message}</p> : null}
+      {showTiming ? <small className="creator-collaboration-stage-timing" aria-live="off">
+        <span>{stage.startedAt === null
+          ? localize(`已等待 ${duration}`, `Waiting ${duration}`, `Väntat ${duration}`)
+          : localize(`已运行 ${duration}`, `Elapsed ${duration}`, `Förfluten tid ${duration}`)}</span>
+        <span>{localize(`最近收到状态：${receivedSeconds} 秒前`, `Last status received ${receivedSeconds}s ago`, `Senaste status mottogs för ${receivedSeconds}s sedan`)}</span>
+      </small> : null}
+      {warning ? <p className="creator-collaboration-stage-message">{warning}</p> : null}
+    </div>
+  );
+}
+
+function CollaborationStageView(props: {
+  stage: CreatorStageRun;
+  actor: CreatorActivity['actor'];
+  adapter: CreatorPanelAdapter;
+  onCancel?(): void;
+  onResume?(): void;
+  controlPending?: 'canceling' | 'resuming';
+}) {
+  const l = useLocalizedCopy();
+  const { stage, actor, adapter } = props;
+  const label = adapter.stageLabel(stage.stageId, l);
+  const progress = adapter.readStageProgress(stage, l);
+  const percent = progress.percent === null
+    ? null
+    : Math.max(0, Math.min(100, Math.round(progress.percent)));
+  const compact = !['queued', 'running'].includes(stage.status);
+  const showPercent = (stage.status === 'running' || stage.status === 'failed')
+    && percent !== null;
+  const indeterminate = (stage.status === 'running' || stage.status === 'queued')
+    && progress.indeterminate === true;
+  const hasProgress = showPercent || indeterminate;
+  return (
+    <article
+      className="creator-collaboration-stage"
+      data-status={stage.status}
+      data-compact={compact || undefined}
+    >
+      <header>
+        <span aria-hidden="true">{stageStatusIcon(stage)}</span>
+        <div className="creator-collaboration-stage-copy">
+          <small>{actorLabel(actor, l)} · {label}</small>
+          <strong>{stageProgressText(stage, progress, adapter, l)}</strong>
+        </div>
+        <div className="creator-collaboration-stage-controls">
+          {showPercent ? <b>{percent}%</b> : null}
+          {props.onCancel !== undefined ? (
+            <button
+              type="button"
+              data-intent="danger"
+              disabled={props.controlPending !== undefined || stage.progress.cancelRequested === true}
+              onClick={props.onCancel}
+              aria-label={l(`终止${label}`, `Stop ${label}`)}
+              title={l('终止当前阶段', 'Stop current stage')}
+            >
+              <Square size={14} fill="currentColor" aria-hidden="true" />
+            </button>
+          ) : props.onResume !== undefined ? (
+            <button
+              type="button"
+              disabled={props.controlPending !== undefined}
+              onClick={props.onResume}
+              aria-label={l(`继续${label}`, `Resume ${label}`)}
+              title={l('从当前阶段重新开始', 'Restart from current stage')}
+            >
+              <Play size={14} strokeWidth={1.9} aria-hidden="true" />
+            </button>
+          ) : null}
+        </div>
+      </header>
+      {hasProgress ? (
+        <div
+          className="creator-collaboration-stage-progress"
+          data-indeterminate={indeterminate || undefined}
+          role="progressbar"
+          aria-label={l(`${label}进度`, `${label} progress`)}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent ?? undefined}
+          aria-valuetext={indeterminate
+            ? stageProgressText(stage, progress, adapter, l)
+            : percent === null
+              ? undefined
+              : stageProgressAriaText(stage, percent, l)}
+        >
+          <span style={percent === null ? undefined : { width: `${percent}%` }} />
+        </div>
+      ) : null}
+      <CreatorStageProgressDetails stage={stage} progress={progress} />
+      {(stage.status === 'running' || stage.status === 'failed') && progress.detailsHref ? <a href={progress.detailsHref}>{l('查看组件下载详情', 'View component download details')}</a> : null}
+    </article>
+  );
+}
+
+function buildCollaborationMessages(
+  agentTurns: CreatorAgentTurn[],
+  items: CreatorAgentItem[]
+): CollaborationMessage[] {
+  const assistantItemsByTurn = new Map<string, CreatorAgentItem[]>();
+  for (const item of items) {
+    if (item.kind !== 'assistant_message' || !item.text?.trim().length) continue;
+    const visible = assistantItemsByTurn.get(item.turnId) ?? [];
+    visible.push(item);
+    assistantItemsByTurn.set(item.turnId, visible);
+  }
+  const messages: CollaborationMessage[] = [];
+  for (const turn of agentTurns) {
+    if (turn.role === 'user') {
+      messages.push({
+        id: `agent:${turn.id}`,
+        role: 'user',
+        content: turn.content,
+        status: turn.status,
+        createdAt: turn.createdAt,
+        source: 'agent'
+      });
+      continue;
+    }
+    const visibleItems = [...(assistantItemsByTurn.get(turn.id) ?? [])]
+      .sort((left, right) => left.sequence - right.sequence);
+    const selectedItem = terminalTurnStatus(turn.status)
+      ? visibleItems.filter(item => item.data.phase === 'final_answer').at(-1)
+        ?? visibleItems.at(-1)
+      : visibleItems.at(-1);
+    if (selectedItem !== undefined) {
+      messages.push({
+        id: `agent:${turn.id}`,
+        role: 'assistant',
+        content: stripInternalRevision(selectedItem.text ?? ''),
+        status: selectedItem.status,
+        createdAt: selectedItem.createdAt,
+        source: 'agent'
+      });
+      continue;
+    }
+    messages.push({
+      id: `agent:${turn.id}`,
+      role: 'assistant',
+      content: stripInternalRevision(turn.content),
+      status: turn.status,
+      createdAt: turn.createdAt,
+      source: 'agent'
+    });
+  }
+  return messages
+    .filter(message => message.content.trim().length > 0)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .slice(-40);
+}
+
+function buildCollaborationTimeline(
+  job: CreatorJob | undefined,
+  issues: OpenCreatorIssue[],
+  messages: CollaborationMessage[],
+  events: SyncEvent[],
+  adapter: CreatorPanelAdapter
+): CollaborationTimelineItem[] {
+  const stages = adapter.aggregateStages?.(latestStageRuns(job?.stages ?? []))
+    ?? latestStageRuns(job?.stages ?? []);
+  const representedStageIds = new Set(stages.map(stage => stage.stageId));
+  const items: CollaborationTimelineItem[] = messages.map(message => ({
+    id: message.id,
+    kind: 'message',
+    createdAt: message.createdAt,
+    message
+  }));
+  for (const event of events) {
+    if (
+      event.action === 'run-stage'
+      && event.stageId !== undefined
+      && representedStageIds.has(event.stageId)
+    ) continue;
+    items.push({
+      id: `activity:${event.id}`,
+      kind: 'activity',
+      createdAt: event.createdAt,
+      event
+    });
+  }
+  for (const stage of stages) {
+    items.push({
+      id: `stage:${stage.stageId}`,
+      kind: 'stage',
+      createdAt: terminalStageStatus(stage.status)
+        ? stage.finishedAt ?? stage.startedAt ?? job?.updatedAt ?? ''
+        : stage.startedAt ?? job?.updatedAt ?? '',
+      stage,
+      actor: stageActor(stage, job?.activities ?? [], adapter)
+    });
+  }
+  for (const issue of issues) {
+    items.push({
+      id: `issue:${issue.id}`,
+      kind: 'issue',
+      createdAt: issue.lastOccurredAt,
+      issue
+    });
+  }
+  return items
+    .sort((left, right) => (
+      left.createdAt.localeCompare(right.createdAt)
+      || timelineItemOrder(left) - timelineItemOrder(right)
+      || left.id.localeCompare(right.id)
+    ))
+    .slice(-60);
+}
+
+function timelineItemOrder(item: CollaborationTimelineItem): number {
+  if (item.kind === 'message') return item.message.role === 'user' ? 0 : 3;
+  if (item.kind === 'activity') return 1;
+  if (item.kind === 'issue') return 3;
+  return 2;
+}
+
+function terminalTurnStatus(status: CreatorAgentTurn['status']): boolean {
+  return !['queued', 'running', 'waiting_approval'].includes(status);
+}
+
+function terminalStageStatus(status: CreatorStageRun['status']): boolean {
+  return status === 'succeeded'
+    || status === 'failed'
+    || status === 'canceled'
+    || status === 'interrupted';
+}
+
+function buildSyncEvents(
+  activities: CreatorActivity[],
+  adapter: CreatorPanelAdapter,
+  l: ReturnType<typeof useLocalizedCopy>
+): SyncEvent[] {
+  const result: SyncEvent[] = [];
+  for (const activity of activities) {
+    const normalized = adapter.normalizeActivity(activity, l);
+    if (normalized === null) continue;
+    const previous = result.at(-1);
+    if (
+      previous !== undefined
+      && previous.actor === activity.actor
+      && previous.label === normalized.label
+      && previous.action.startsWith('update-settings')
+      && activity.action.startsWith('update-settings')
+    ) {
+      previous.id = activity.id;
+      previous.count += 1;
+      previous.fields = [...new Set([...previous.fields, ...normalized.fields])];
+      previous.createdAt = activity.createdAt;
+      continue;
+    }
+    result.push({
+      id: activity.id,
+      actor: activity.actor,
+      action: activity.action,
+      label: normalized.label,
+      fields: normalized.fields,
+      count: 1,
+      createdAt: activity.createdAt,
+      ...(activity.action === 'run-stage'
+        ? { stageId: adapter.activityStageId(activity) ?? undefined }
+        : {})
+    });
+  }
+  return result;
+}
+
+function actorLabel(
+  actor: CreatorActivity['actor'],
+  l: ReturnType<typeof useLocalizedCopy>
+): string {
+  if (actor === 'agent') return 'Agent';
+  if (actor === 'system') return l('系统', 'System');
+  return l('工作台', 'Workbench');
+}
+
+function latestStageRuns(stages: CreatorStageRun[]): CreatorStageRun[] {
+  const runsByStage = new Map<string, CreatorStageRun[]>();
+  for (const stage of stages) {
+    const key = `${stage.stageId}:${stage.scopeKey ?? ''}`;
+    const runs = runsByStage.get(key) ?? [];
+    runs.push(stage);
+    runsByStage.set(key, runs);
+  }
+  return [...runsByStage.values()].map(runs => {
+    const latest = runs.at(-1)!;
+    if (latest.status !== 'queued') return latest;
+    return [...runs].reverse().find(stage => stage.status === 'running')
+      ?? latest;
+  }).sort((left, right) => (
+    (left.startedAt ?? '').localeCompare(right.startedAt ?? '')
+    || left.stageId.localeCompare(right.stageId)
+  ));
+}
+
+function activeStageRun(stages: CreatorStageRun[]): CreatorStageRun | undefined {
+  const latestFirst = [...latestStageRuns(stages)].reverse();
+  return latestFirst.find(stage => stage.status === 'running')
+    ?? latestFirst.find(stage => stage.status === 'queued');
+}
+
+function stageActor(
+  stage: CreatorStageRun,
+  activities: CreatorActivity[],
+  adapter: CreatorPanelAdapter
+): CreatorActivity['actor'] {
+  const startedAt = stage.startedAt ?? '\uffff';
+  return activities
+    .filter(activity => (
+      activity.action === 'run-stage'
+      && adapter.activityStageId(activity) === stage.stageId
+      && activity.createdAt <= startedAt
+    ))
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .at(-1)?.actor ?? 'system';
+}
+
+function stageProgressText(
+  stage: CreatorStageRun,
+  progress: CreatorStageProgressView,
+  adapter: CreatorPanelAdapter,
+  l: ReturnType<typeof useLocalizedCopy>
+): string {
+  if (stage.progress.cancelRequested === true && (
+    stage.status === 'queued' || stage.status === 'running'
+  )) return l('正在终止当前阶段', 'Stopping current stage');
+  if (stage.status === 'queued') return l('等待执行', 'Queued');
+  if (stage.status === 'succeeded') {
+    return adapter.succeededProgressText?.(stage, l)
+      ?? l('已完成', 'Completed');
+  }
+  if (stage.status === 'failed') {
+    return adapter.failedProgressText?.(stage, l)
+      ?? creatorSystemIssueText(stage.errorCode, l)
+      ?? l('执行失败', 'Failed');
+  }
+  if (stage.status === 'interrupted') return l('已中断，可继续', 'Interrupted. Ready to resume');
+  if (stage.status === 'canceled') return l('已终止，可继续', 'Stopped. Ready to resume');
+  const formatted = adapter.runningProgressText?.(stage, progress, l);
+  if (formatted) return formatted;
+  if (progress.phase) {
+    return adapter.phaseLabel(progress.phase, l) ?? l('执行中', 'Running');
+  }
+  return l('执行中', 'Running');
+}
+
+function approvalDisplayCopy(
+  kind: CreatorAgentApproval['kind'],
+  l: CreatorPanelLocalize
+): { title: string; summary: string } {
+  if (kind === 'command_execution') {
+    return {
+      title: l('确认命令执行', 'Confirm command execution'),
+      summary: l(
+        'Agent 请求执行命令以继续当前任务。',
+        'The Agent wants to run a command to continue this task.'
+      )
+    };
+  }
+  if (kind === 'file_change') {
+    return {
+      title: l('确认文件修改', 'Confirm file changes'),
+      summary: l(
+        'Agent 请求修改项目文件以继续当前任务。',
+        'The Agent wants to modify project files to continue this task.'
+      )
+    };
+  }
+  if (kind === 'permissions') {
+    return {
+      title: l('确认权限请求', 'Confirm permission request'),
+      summary: l(
+        'Agent 请求额外权限以继续当前任务。',
+        'The Agent is requesting additional permissions to continue this task.'
+      )
+    };
+  }
+  return {
+    title: l('确认工具调用', 'Confirm tool call'),
+    summary: l(
+      'Agent 请求调用工具以继续当前任务。',
+      'The Agent wants to use a tool to continue this task.'
+    )
+  };
+}
+
+function stageProgressAriaText(
+  stage: CreatorStageRun,
+  percent: number,
+  l: ReturnType<typeof useLocalizedCopy>
+): string {
+  if (stage.status === 'failed') return l(`失败前进度 ${percent}%`, `Progress before failure: ${percent}%`);
+  if (stage.status === 'succeeded') return l(`已完成 ${percent}%`, `Completed: ${percent}%`);
+  if (stage.status === 'canceled' || stage.status === 'interrupted') {
+    return l(`终止前进度 ${percent}%`, `Progress before stopping: ${percent}%`);
+  }
+  return `${percent}%`;
+}
+
+function stageStatusIcon(stage: CreatorStageRun) {
+  if (stage.status === 'failed') return <XCircle size={15} strokeWidth={1.8} />;
+  if (stage.status === 'running' || stage.status === 'queued') {
+    return <LoaderCircle className="creator-collaboration-spin" size={15} strokeWidth={1.8} />;
+  }
+  if (stage.status === 'canceled' || stage.status === 'interrupted') {
+    return <Square size={14} fill="currentColor" />;
+  }
+  return <CheckCircle2 size={15} strokeWidth={1.8} />;
+}
+
+function stripInternalRevision(content: string): string {
+  return content
+    .replace(/[^\n。！？!?]*\brevision\b[^\n。！？!?]*[。！？!?]?/gi, '')
+    .replace(/^\s*[-*]\s*(?:当前\s*)?revision\s*[：:]\s*`?\d+`?\s*$/gim, '')
+    .replace(/(?:任务未做修改[，,]\s*)?revision\s+仍为\s*`?\d+`?[。.]?/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}

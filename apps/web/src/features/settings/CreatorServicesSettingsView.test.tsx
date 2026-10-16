@@ -1,0 +1,701 @@
+import {
+  createDefaultCreatorServicesConfig,
+  type CodexModelListResponse,
+  type CreatorServicesCapabilitiesResponse,
+  type CreatorServicesCredentialField,
+  type CreatorTtsProvider
+} from '@opencreator/protocol';
+import { render, screen, waitFor } from '@testing-library/react';
+import { userEvent } from '@testing-library/user-event';
+import { describe, expect, it, vi } from 'vitest';
+import { ConfirmDialogProvider } from '../../components/dialogs/ConfirmDialogProvider.js';
+import { LanguageProvider } from '../../i18n/LanguageProvider.js';
+import type { CreatorServicesSettingsService } from '../../services/creator-services-service.js';
+import { CreatorServicesSettingsView } from './CreatorServicesSettingsView.js';
+
+describe('CreatorServicesSettingsView', () => {
+  it('keeps the saved image service active until a detected local service is manually saved', async () => {
+    const user = userEvent.setup();
+    const service = createService();
+    const originalRead = service.getConfig;
+    service.getConfig = vi.fn(async () => {
+      const response = await originalRead();
+      return { ...response, config: { ...response.config, image: { ...response.config.image, provider: 'openai' as const } } };
+    });
+    service.getCodexImageStatus = vi.fn(async () => ({ authentication: 'chatgpt' as const, ready: true, executionMode: 'native' as const, message: 'ready' }));
+    render(<CreatorServicesSettingsView connected service={service} modelService={createModelService()} initialSection="image" />);
+    await user.click(await screen.findByRole('combobox', { name: '服务商' }));
+    await user.click(screen.getByRole('option', { name: '本机 Codex 生图' }));
+    expect(await screen.findByText('ChatGPT 登录态 · 原生生图')).toBeVisible();
+    expect(screen.queryByText(/本机 Codex 生图已生效/)).not.toBeInTheDocument();
+    expect(service.saveConfig).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    expect(await screen.findByText(/本机 Codex 生图已生效，无需保存即可使用/)).toBeVisible();
+    expect(service.saveConfig).toHaveBeenCalledOnce();
+  });
+  it.each(['chatgpt', 'api_key'] as const)('uses detected %s defaults without asking for a settings save', async authentication => {
+    const service = createService([], runtimeCapabilities('darwin', 'arm64'), 'codex');
+    service.getCodexModelStatus = vi.fn(async () => ({ authentication, apiKeyConfigured: authentication === 'api_key', baseUrl: '', model: 'local-model' }));
+    service.getCodexImageStatus = vi.fn(async () => ({ authentication, ready: true, executionMode: authentication === 'chatgpt' ? 'native' as const : 'api' as const, message: 'ready' }));
+    const modelService = createModelService();
+    render(<CreatorServicesSettingsView connected service={service} modelService={modelService} />);
+    expect(await screen.findByText(/已自动启用本机 Codex，无需保存即可使用/)).toBeVisible();
+    expect(modelService.getCodexProvider).not.toHaveBeenCalled();
+    expect(service.saveConfig).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('tab', { name: '图像生成' }));
+    expect(await screen.findByText(/本机 Codex 生图已生效，无需保存即可使用/)).toBeVisible();
+    expect(service.saveConfig).not.toHaveBeenCalled();
+  });
+  it('loads the real Codex image status only in the native image settings section', async () => {
+    const service = createService();
+    service.getCodexImageStatus = vi.fn(async () => ({ authentication: 'chatgpt' as const, ready: true, executionMode: 'native' as const, message: '本地登录凭据已就绪' }));
+    render(<CreatorServicesSettingsView connected service={service} modelService={createModelService()} />);
+    expect(service.getCodexImageStatus).not.toHaveBeenCalled();
+    await userEvent.click(await screen.findByRole('tab', { name: '图像生成' }));
+    expect(await screen.findByText('ChatGPT 登录态 · 原生生图')).toBeInTheDocument();
+    expect(screen.getByText(/已检测到本地 ChatGPT 登录凭据和原生生图工具/)).toBeInTheDocument();
+    expect(screen.queryByText('本地登录凭据已就绪')).not.toBeInTheDocument();
+    expect(service.getCodexImageStatus).toHaveBeenCalledOnce();
+    expect(screen.getByText(/生图方式跟随本机 Codex 的登录和配置/)).toBeVisible();
+    expect(screen.queryByRole('button', { name: '配置 Agent' })).not.toBeInTheDocument();
+  });
+  it('saves an OSS region and optional endpoint in the shared settings form', async () => {
+    const user = userEvent.setup();
+    const service = createService([
+      'transcription.aliyun.oss.accessKeyId',
+      'transcription.aliyun.speech.appKey'
+    ]);
+    render(<CreatorServicesSettingsView connected service={service} modelService={createModelService()} />);
+    await user.click(await screen.findByRole('tab', { name: '语音识别' }));
+    await user.click(screen.getByRole('combobox', { name: '语音识别服务' }));
+    await user.click(screen.getByRole('option', { name: '阿里云百炼' }));
+    const [ossAccessKey, speechAccessKey] = screen.getAllByLabelText('Access Key ID');
+    expect(ossAccessKey).toHaveAttribute('placeholder', '已配置，留空则保持');
+    expect(speechAccessKey).toHaveAttribute('placeholder', '输入密钥');
+    expect(screen.getByLabelText('App Key')).toHaveAttribute('placeholder', '已配置，留空则保持');
+    await user.type(ossAccessKey!, 'oss-key');
+    await user.type(screen.getByLabelText('App Key'), 'speech-key');
+    expect(screen.getByLabelText('OSS 地域')).toHaveValue('cn-shanghai');
+    expect(screen.getByLabelText('OSS Endpoint（可选）')).toHaveValue('');
+    await user.clear(screen.getByLabelText('OSS 地域'));
+    await user.type(screen.getByLabelText('OSS 地域'), 'ap-southeast-1');
+    expect(screen.getByLabelText('OSS Endpoint（可选）')).toHaveAttribute('placeholder', 'https://oss-ap-southeast-1.aliyuncs.com');
+    await user.type(screen.getByLabelText('OSS Endpoint（可选）'), 'https://oss-ap-southeast-1.aliyuncs.com');
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(service.saveConfig).toHaveBeenCalled());
+    expect(vi.mocked(service.saveConfig).mock.calls[0]?.[0].transcription.aliyun.oss).toMatchObject({
+      accessKeyId: 'oss-key', region: 'ap-southeast-1', endpoint: 'https://oss-ap-southeast-1.aliyuncs.com'
+    });
+    expect(vi.mocked(service.saveConfig).mock.calls[0]?.[0].transcription.aliyun.speech.appKey).toBe('speech-key');
+  });
+
+  it('uses the local Codex runtime without exposing custom provider fields', async () => {
+    const user = userEvent.setup();
+    const service = createService([], runtimeCapabilities('darwin', 'arm64'), 'codex');
+    const modelService = createModelService({ authentication: 'chatgpt', apiKeyConfigured: false });
+    render(
+      <CreatorServicesSettingsView connected service={service} modelService={modelService} />
+    );
+
+    expect(await screen.findByRole('button', { name: 'Codex 本机运行时' }))
+      .toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('已连接本机 Codex · ChatGPT 登录')).toBeInTheDocument();
+    expect(screen.getByText('文本任务可用')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => expect(service.saveConfig).toHaveBeenCalled());
+    expect(modelService.updateCodexProvider).not.toHaveBeenCalled();
+    expect(vi.mocked(service.saveConfig).mock.calls[0]?.[0].llm.source).toBe('codex');
+  });
+
+  it('keeps custom model configuration available when local Codex is unavailable', async () => {
+    const user = userEvent.setup();
+    const service = createService([], runtimeCapabilities('darwin', 'arm64'), 'codex');
+    const modelService = createModelService();
+    vi.mocked(modelService.getCodexProvider).mockRejectedValue(new Error('Codex unavailable'));
+    render(
+      <CreatorServicesSettingsView connected service={service} modelService={modelService} />
+    );
+
+    expect(await screen.findByText('未检测到可用的本机 Codex Runtime')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存配置' })).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: '自定义模型服务' }));
+
+    expect(screen.getByLabelText('Base URL')).toBeInTheDocument();
+    expect(screen.getByLabelText('API Key')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存配置' })).toBeEnabled();
+  });
+
+  it('edits the custom model service used by text tasks', async () => {
+    const user = userEvent.setup();
+    const service = createService(['llm.apiKey']);
+    const modelService = createModelService();
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={service}
+        modelService={modelService}
+      />
+    );
+
+    expect(await screen.findByRole('heading', { name: 'AI 服务' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '模型服务' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://gateway.example.test/v1');
+    expect(screen.getByLabelText('模型')).toHaveValue('gpt-shared');
+    expect(screen.getByLabelText('API Key')).toHaveAttribute('type', 'password');
+    expect(screen.getByLabelText('API Key')).toHaveAttribute('placeholder', '已配置，留空则保持');
+    expect(screen.getByText('文本任务可用')).toBeInTheDocument();
+
+    await user.clear(screen.getByLabelText('模型'));
+    await user.type(screen.getByLabelText('模型'), 'gpt-unified');
+    await user.type(screen.getByLabelText('API Key'), 'sk-unified');
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => expect(service.saveConfig).toHaveBeenCalled());
+    expect(modelService.updateCodexProvider).not.toHaveBeenCalled();
+    expect(vi.mocked(service.saveConfig).mock.calls[0]?.[0].llm).toMatchObject({
+      baseUrl: 'https://gateway.example.test/v1',
+      apiKey: 'sk-unified',
+      model: 'gpt-unified',
+      source: 'custom'
+    });
+    expect(screen.getByText('配置已安全保存')).toBeInTheDocument();
+  });
+
+  it('shows validation errors beside the invalid model fields', async () => {
+    const user = userEvent.setup();
+    const modelService = createModelService();
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={createService()}
+        modelService={modelService}
+      />
+    );
+
+    await screen.findByRole('heading', { name: 'AI 服务' });
+    await user.clear(screen.getByLabelText('Base URL'));
+    await user.type(screen.getByLabelText('Base URL'), 'not-a-url');
+    await user.clear(screen.getByLabelText('模型'));
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    expect(screen.getByLabelText('Base URL')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByText('请输入有效的 HTTP 或 HTTPS 地址')).toBeInTheDocument();
+    expect(screen.getByLabelText('模型')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByText('模型不能为空')).toBeInTheDocument();
+    expect(modelService.updateCodexProvider).not.toHaveBeenCalled();
+  });
+
+  it('shows the failing save stage and Runtime error message', async () => {
+    const user = userEvent.setup();
+    const service = createService();
+    vi.mocked(service.saveConfig).mockRejectedValue(
+      new Error('Base URL 必须是有效的 HTTP 或 HTTPS 地址')
+    );
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={service}
+        modelService={createModelService()}
+      />
+    );
+
+    await screen.findByRole('heading', { name: 'AI 服务' });
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    const issue = await screen.findByRole('alert');
+    expect(issue).toHaveTextContent('模型服务保存失败，请检查标出的字段后重试。');
+    expect(issue).not.toHaveTextContent(/诊断编号：OC-/);
+    expect(issue).not.toHaveTextContent('Base URL 必须是有效的 HTTP 或 HTTPS 地址');
+    expect(screen.getByLabelText('Base URL')).toHaveAttribute('aria-invalid', 'true');
+  });
+
+  it('shows configured credentials without loading their secret values', async () => {
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={createService(['llm.apiKey'])}
+        modelService={createModelService()}
+      />
+    );
+
+    const apiKey = await screen.findByLabelText('API Key');
+    expect(apiKey).toHaveValue('');
+    expect(apiKey).toHaveAttribute('placeholder', '已配置，留空则保持');
+    expect(screen.queryByDisplayValue(/secret/i)).not.toBeInTheDocument();
+  });
+
+  it('applies an LLM provider preset and model suggestions', async () => {
+    const user = userEvent.setup();
+    const service = createService();
+    const modelService = createModelService();
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={service}
+        modelService={modelService}
+      />
+    );
+
+    await screen.findByRole('heading', { name: 'AI 服务' });
+    await user.selectOptions(screen.getByLabelText('供应商'), 'deepseek');
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://api.deepseek.com');
+    expect(screen.getByLabelText('模型')).toHaveValue('deepseek-v4-pro');
+    expect(screen.getByRole('option', { name: 'deepseek-v4-flash' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'MiniMax-M2.7' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(service.saveConfig).toHaveBeenCalled());
+    expect(modelService.updateCodexProvider).not.toHaveBeenCalled();
+  });
+
+  it('does not report a custom provider ready from an unrelated API key login', async () => {
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={createService()}
+        modelService={createModelService({ apiKeyConfigured: false })}
+      />
+    );
+
+    expect(await screen.findByText('文本任务需要 API Key')).toBeInTheDocument();
+  });
+
+  it('defaults OpenAI to GPT-5.6 and keeps it in the Runtime model list', async () => {
+    const user = userEvent.setup();
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={createService()}
+        modelService={createModelService({ runtimeModels: ['gpt-5.6-sol', 'gpt-5.5'] })}
+      />
+    );
+
+    await screen.findByRole('heading', { name: 'AI 服务' });
+    await user.selectOptions(screen.getByLabelText('供应商'), 'openai');
+
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://api.openai.com/v1');
+    expect(screen.getByLabelText('模型')).toHaveValue('gpt-5.6-sol');
+    expect(screen.getByRole('option', { name: 'gpt-5.5' })).toBeInTheDocument();
+  });
+
+  it('allows switching from a provider model to a custom model', async () => {
+    const user = userEvent.setup();
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={createService()}
+        modelService={createModelService()}
+      />
+    );
+
+    await screen.findByRole('heading', { name: 'AI 服务' });
+    await user.selectOptions(screen.getByLabelText('供应商'), 'deepseek');
+    await user.selectOptions(screen.getByLabelText('模型'), '__custom__');
+
+    const customModel = screen.getByPlaceholderText('gpt-5.6-sol');
+    await user.clear(customModel);
+    await user.type(customModel, 'my-custom-model');
+    expect(customModel).toHaveValue('my-custom-model');
+  });
+
+  it('keeps MiniMax models separate from the OpenAI Runtime catalog', async () => {
+    const user = userEvent.setup();
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={createService()}
+        modelService={createModelService({ runtimeModels: ['gpt-5.5'] })}
+      />
+    );
+
+    await screen.findByRole('heading', { name: 'AI 服务' });
+    await user.selectOptions(screen.getByLabelText('供应商'), 'minimax');
+    expect(screen.getByLabelText('模型')).toHaveValue('MiniMax-M2.7');
+    expect(screen.getByRole('option', { name: 'MiniMax-M2.7-highspeed' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'gpt-5.5' })).not.toBeInTheDocument();
+  });
+
+  it('shows only the fields required by the selected transcription and voice providers', async () => {
+    const user = userEvent.setup();
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={createService()}
+        modelService={createModelService()}
+      />
+    );
+    await screen.findByRole('tabpanel');
+
+    await user.click(screen.getByRole('tab', { name: '语音识别' }));
+    expect(screen.getByText('macOS · Apple Silicon')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '云端 API' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText(/API Key 可以暂不填写/)).toBeInTheDocument();
+    expect(screen.getByText('whisper-1')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '本地 Whisper' }));
+    expect(screen.getByRole('combobox', { name: '语音识别服务' })).toHaveTextContent('WhisperKit');
+    expect(screen.getByText('large-v2')).toBeInTheDocument();
+    expect(screen.queryByText('FasterWhisper')).not.toBeInTheDocument();
+    expect(screen.queryByText('Whisper.cpp')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '云端 API' }));
+    await user.click(screen.getByRole('combobox', { name: '语音识别服务' }));
+    await user.click(screen.getByRole('option', { name: '阿里云百炼' }));
+    expect(screen.getByText('OSS 存储')).toBeInTheDocument();
+    expect(screen.getByText('语音服务')).toBeInTheDocument();
+    expect(screen.getAllByLabelText('Access Key Secret')).toHaveLength(2);
+
+    await user.click(screen.getByRole('combobox', { name: '语音识别服务' }));
+    await user.click(screen.getByRole('option', { name: '火山引擎' }));
+    expect(screen.getByLabelText('Access Token')).toBeInTheDocument();
+    expect(screen.getByLabelText('资源 ID')).toHaveValue('volc.seedasr.auc');
+    expect(screen.getByText(/共用同一套 Access Token/)).toBeInTheDocument();
+    expect(screen.queryByText('OSS 存储')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: '配音服务' }));
+    await user.click(screen.getByRole('combobox', { name: '服务商' }));
+    await user.click(screen.getByRole('option', { name: '火山引擎' }));
+    expect(screen.getByRole('combobox', { name: '接口 / 集群' }))
+      .toHaveTextContent('小模型 TTS（volcano_tts）');
+    expect(screen.getByLabelText('Access Token')).toBeInTheDocument();
+    expect(screen.getByLabelText('克隆 / 自定义 Speaker ID')).toBeInTheDocument();
+    expect(screen.getByText(/使用与语音识别相同的豆包语音控制台/)).toBeInTheDocument();
+    expect(screen.getByText(/豆包 2.0 \/ 声音复刻走 V3/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('combobox', { name: '服务商' }));
+    await user.click(screen.getByRole('option', { name: 'Edge TTS' }));
+    expect(screen.getByText('无需填写凭据。运行时会使用本地 Edge TTS 服务。'))
+      .toBeInTheDocument();
+    expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument();
+  });
+
+  it('confirms before saving a newly selected local Whisper provider', async () => {
+    const user = userEvent.setup();
+    const service = createService();
+    render(
+      <ConfirmDialogProvider>
+        <CreatorServicesSettingsView
+          connected
+          service={service}
+          modelService={createModelService()}
+        />
+      </ConfirmDialogProvider>
+    );
+
+    await user.click(await screen.findByRole('tab', { name: '语音识别' }));
+    await user.click(screen.getByRole('button', { name: '本地 Whisper' }));
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    expect(await screen.findByRole('heading', { name: '启用本地语音识别' })).toBeInTheDocument();
+    expect(screen.getByText(/KrillinAI 下次启动时会检查并按需下载 WhisperKit large-v2/))
+      .toBeInTheDocument();
+    expect(service.saveConfig).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: '保存并启用' }));
+    await waitFor(() => expect(service.saveConfig).toHaveBeenCalled());
+    expect(vi.mocked(service.saveConfig).mock.calls[0]?.[0].transcription.provider)
+      .toBe('whisperkit');
+  });
+
+  it('allows selecting and saving local Whisper.cpp on Windows x64', async () => {
+    const service = createService([], runtimeCapabilities('win32', 'x64'));
+    const user = userEvent.setup();
+    render(
+      <ConfirmDialogProvider>
+      <CreatorServicesSettingsView
+        connected
+        service={service}
+        modelService={createModelService()}
+      />
+      </ConfirmDialogProvider>
+    );
+
+    await user.click(await screen.findByRole('tab', { name: '语音识别' }));
+    expect(screen.getByText('Windows · x64')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '本地 Whisper' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: '本地 Whisper' }));
+    expect(screen.getByRole('combobox', { name: '语音识别服务' })).toHaveTextContent('Whisper.cpp');
+    expect(screen.getByText('tiny')).toBeInTheDocument();
+    expect(screen.getByText(/预计占用磁盘 74 MiB/)).toBeInTheDocument();
+    expect(screen.queryByText('WhisperKit')).not.toBeInTheDocument();
+    expect(screen.queryByText('FasterWhisper')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await user.click(await screen.findByRole('button', { name: '保存并启用' }));
+    expect(service.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      transcription: expect.objectContaining({ provider: 'whisper.cpp' })
+    }));
+  });
+
+  it('requires reselecting a local provider saved on another Runtime', async () => {
+    const user = userEvent.setup();
+    const service = createService([], runtimeCapabilities('win32', 'x64'));
+    const staleConfig = createDefaultCreatorServicesConfig();
+    staleConfig.transcription.provider = 'whisperkit';
+    vi.mocked(service.getConfig).mockResolvedValue({
+      config: staleConfig,
+      configuredCredentials: []
+    });
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={service}
+        modelService={createModelService()}
+      />
+    );
+
+    await user.click(await screen.findByRole('tab', { name: '语音识别' }));
+    expect(screen.getByRole('button', { name: '本地 Whisper' }))
+      .toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      '当前 Windows · x64 不支持 WhisperKit 的受控安装'
+    );
+
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    expect(service.saveConfig).not.toHaveBeenCalled();
+    expect(screen.getByText('当前 Runtime 不支持已选语音识别服务，请重新选择后保存。'))
+      .toBeInTheDocument();
+  });
+
+  it('localizes the service navigation in English', async () => {
+    render(
+      <LanguageProvider initialPreference="en-US">
+        <CreatorServicesSettingsView
+          connected
+          service={createService()}
+          modelService={createModelService()}
+        />
+      </LanguageProvider>
+    );
+
+    expect(await screen.findByRole('heading', { name: 'AI Services' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Models' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Transcription' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Voice' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Images' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Video' })).toBeInTheDocument();
+  });
+
+  it('configures image and video generation as separate services', async () => {
+    const user = userEvent.setup();
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={createService()}
+        modelService={createModelService()}
+      />
+    );
+    await screen.findByRole('tabpanel');
+
+    await user.click(screen.getByRole('tab', { name: '图像生成' }));
+    expect(screen.getByRole('combobox', { name: '服务商' })).toHaveTextContent('本机 Codex 生图');
+    expect(screen.queryByLabelText('模型')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('combobox', { name: '服务商' }));
+    await user.click(screen.getByRole('option', { name: 'GPT Image' }));
+    expect(screen.getByLabelText('模型')).toHaveValue('gpt-image-1');
+    await user.click(screen.getByRole('combobox', { name: '服务商' }));
+    await user.click(screen.getByRole('option', { name: '可灵' }));
+    expect(screen.getByLabelText('Access Key')).toHaveAttribute('type', 'password');
+    expect(screen.getByLabelText('Secret Key')).toHaveAttribute('type', 'password');
+
+    await user.click(screen.getByRole('tab', { name: '视频生成' }));
+    expect(screen.getByRole('combobox', { name: '服务商' })).toHaveTextContent('Seedance');
+    expect(screen.getByLabelText('默认模型')).toHaveValue('doubao-seedance-2-5-260628');
+    expect(screen.getByRole('option', { name: 'doubao-seedance-2-5-260628' })).toBeInTheDocument();
+    expect(screen.getByLabelText('API Key')).toHaveAttribute('type', 'password');
+    await user.click(screen.getByRole('combobox', { name: '服务商' }));
+    await user.click(screen.getByRole('option', { name: 'Veo' }));
+    expect(screen.getByLabelText('默认模型')).toHaveValue('veo-3.1-generate-preview');
+  });
+
+  it('uses local Codex image generation by default without configuration fields', async () => {
+    const user = userEvent.setup();
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={createService()}
+        modelService={createModelService()}
+      />
+    );
+    await screen.findByRole('tabpanel');
+
+    await user.click(screen.getByRole('tab', { name: '图像生成' }));
+    expect(screen.getByRole('combobox', { name: '服务商' }))
+      .toHaveTextContent('本机 Codex 生图');
+    expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Base URL')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('模型')).not.toBeInTheDocument();
+  });
+
+  it('keeps non-model services available when the model provider cannot be read', async () => {
+    const modelService = createModelService();
+    vi.mocked(modelService.getCodexProvider).mockRejectedValue(
+      new Error('model provider unavailable')
+    );
+    render(
+      <CreatorServicesSettingsView
+        connected
+        service={createService()}
+        modelService={modelService}
+        initialSection="tts"
+      />
+    );
+
+    expect(await screen.findByRole('tab', { name: '配音服务' }))
+      .toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('combobox', { name: '服务商' })).toBeInTheDocument();
+    expect(screen.queryByText('配置暂不可用')).not.toBeInTheDocument();
+  });
+
+  it('explains that the local Runtime is required when disconnected', () => {
+    render(<CreatorServicesSettingsView connected={false} service={null} />);
+
+    expect(screen.getByText('连接本地 Runtime 后即可管理 AI 服务配置。'))
+      .toBeInTheDocument();
+  });
+});
+
+function createService(
+  configuredCredentials: CreatorServicesCredentialField[] = [],
+  capabilities: CreatorServicesCapabilitiesResponse = runtimeCapabilities('darwin', 'arm64'),
+  source: 'codex' | 'custom' = 'custom'
+): CreatorServicesSettingsService {
+  const config = createDefaultCreatorServicesConfig();
+  config.llm.baseUrl = 'https://gateway.example.test/v1';
+  config.llm.model = 'gpt-shared';
+  config.llm.source = source;
+  return {
+    getCapabilities: vi.fn(async () => structuredClone(capabilities)),
+    getConfig: vi.fn(async () => ({ config: structuredClone(config), configuredCredentials })),
+    saveConfig: vi.fn(async next => ({ config: structuredClone(next), configuredCredentials })),
+    resetConfig: vi.fn(async () => ({ config: createDefaultCreatorServicesConfig(), configuredCredentials: [] })),
+    testTranscriptionConnection: vi.fn(async () => ({ connected: true, model: 'sensevoice', models: ['sensevoice'], capabilities: ['audio.transcriptions'] })),
+    getTtsVoices: vi.fn(async (provider: CreatorTtsProvider) => ({
+      provider,
+      model: config.tts[provider === 'edge-tts' ? 'openai' : provider].model,
+      voices: provider === 'edge-tts'
+        ? []
+        : [{
+            id: config.tts[provider].defaultVoiceId,
+            name: config.tts[provider].defaultVoiceId,
+            provider,
+            kind: 'builtin' as const
+          }]
+    })),
+    previewTtsVoice: vi.fn(async () => new Response(Buffer.from('preview-audio'), {
+      status: 200,
+      headers: { 'Content-Type': 'audio/mpeg' }
+    }))
+  };
+}
+
+function createModelService(options: {
+  authentication?: 'none' | 'chatgpt' | 'api_key';
+  apiKeyConfigured?: boolean;
+  runtimeModels?: string[];
+} = {}) {
+  const provider = {
+    baseUrl: 'https://gateway.example.test/v1',
+    model: 'gpt-shared',
+    authentication: options.authentication ?? 'api_key' as const,
+    apiKeyConfigured: options.apiKeyConfigured ?? true,
+    configVersion: 'v1'
+  };
+  return {
+    getCodexProvider: vi.fn(async () => structuredClone(provider)),
+    getCodexModels: vi.fn(async (): Promise<CodexModelListResponse> => ({
+      models: (options.runtimeModels ?? []).map(model => ({
+        id: model,
+        model,
+        displayName: model,
+        description: '',
+        supportedReasoningEfforts: [],
+        defaultReasoningEffort: null,
+        inputModalities: ['text'],
+        isDefault: false
+      }))
+    })),
+    updateCodexProvider: vi.fn(async input => ({
+      baseUrl: input.baseUrl,
+      model: input.model,
+      authentication: input.apiKey === undefined
+        ? provider.authentication
+        : 'api_key' as const,
+      apiKeyConfigured: input.apiKey !== undefined || provider.apiKeyConfigured,
+      configVersion: 'v2'
+    }))
+  };
+}
+
+function runtimeCapabilities(
+  platform: string,
+  arch: string
+): CreatorServicesCapabilitiesResponse {
+  const whisperKitAvailable = platform === 'darwin' && arch === 'arm64';
+  const whisperCppAvailable = platform === 'win32' && arch === 'x64';
+  return {
+    platform,
+    arch,
+    transcription: {
+      providers: [
+        {
+          provider: 'openai',
+          kind: 'cloud',
+          available: true,
+          models: ['whisper-1'],
+          gpuAcceleration: false
+        },
+        {
+          provider: 'faster-whisper',
+          kind: 'local',
+          available: false,
+          models: ['tiny', 'medium', 'large-v2'],
+          gpuAcceleration: true,
+          unavailableReason: platform === 'win32' || platform === 'linux'
+            ? 'installer_unavailable'
+            : 'unsupported_platform'
+        },
+        {
+          provider: 'whisperkit',
+          kind: 'local',
+          available: whisperKitAvailable,
+          models: ['large-v2'],
+          gpuAcceleration: false,
+          ...(whisperKitAvailable ? {} : { unavailableReason: 'unsupported_platform' as const })
+        },
+        {
+          provider: 'whisper.cpp',
+          kind: 'local',
+          available: whisperCppAvailable,
+          models: ['tiny', 'medium', 'large-v2', 'large-v3-turbo'],
+          modelDetails: {
+            tiny: { diskBytes: 77691713 },
+            medium: { diskBytes: 1533763059 },
+            'large-v2': { diskBytes: 3094623691 },
+            'large-v3-turbo': { diskBytes: 1624555275 }
+          },
+          gpuAcceleration: false,
+          ...(whisperCppAvailable ? {} : { unavailableReason: 'unsupported_platform' as const })
+        },
+        {
+          provider: 'aliyun',
+          kind: 'cloud',
+          available: true,
+          models: [],
+          gpuAcceleration: false
+        },
+        {
+          provider: 'volcengine',
+          kind: 'cloud',
+          available: true,
+          models: [],
+          gpuAcceleration: false
+        }
+      ]
+    }
+  };
+}

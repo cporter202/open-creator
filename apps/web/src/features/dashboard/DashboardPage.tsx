@@ -1,0 +1,1057 @@
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import type { CreatorJob, CreatorJson, GatewayAccountState, OpenCreatorIssue } from '@opencreator/protocol';
+import { OfficialServicesContext } from './official-services.js';
+import type { GatewayAccountSettingsService } from '../../services/gateway-account-service.js';
+import { useAppLanguage } from '../../i18n/LanguageProvider.js';
+import { createLocalizedCopy } from '../../i18n/localized-copy.js';
+import { useLocalizedCopy } from '../../i18n/useLocalizedCopy.js';
+import {
+  ArrowUpRight,
+  Clapperboard,
+  Download,
+  FilePenLine,
+  Image,
+  ImagePlus,
+  Languages,
+  Mic2,
+  PenLine,
+  Newspaper,
+  Search,
+  ServerOff,
+  Sparkles,
+  UserRound,
+  WandSparkles,
+  type LucideIcon
+} from 'lucide-react';
+import './dashboard.css';
+import AutoClipWorkspace from './AutoClipWorkspace.js';
+import CoverGeneratorWorkspace from './CoverGeneratorWorkspace.js';
+import DigitalAvatarWorkspace from './DigitalAvatarWorkspace.js';
+import ImageGenerationWorkspace from './ImageGenerationWorkspace.js';
+import ShortVideoScriptWorkspace from './ShortVideoScriptWorkspace.js';
+import SmartDubbingWorkspace from './SmartDubbingWorkspace.js';
+import XiaohongshuPostWorkspace from './XiaohongshuPostWorkspace.js';
+import WechatArticleWorkspace from './WechatArticleWorkspace.js';
+import StickmanVideoWorkspace from './StickmanVideoWorkspace.js';
+import VideoDownloadBatchWorkspace from './VideoDownloadBatchWorkspace.js';
+import VideoTranslationWorkspace from './VideoTranslationWorkspace.js';
+import VideoGenerationWorkspace from './VideoGenerationWorkspace.js';
+import type { CreatorWebService } from '../../services/creator-service.js';
+import { ApiClientError } from '../../runtime/errors.js';
+import { createCreatorSnapshotSubscription, type CreatorConnectionState } from '../../runtime/creator-sse.js';
+import { RuntimeRecoveryNotice } from '../../runtime/runtime-recovery.js';
+import type { RuntimeDependenciesController } from '../../app/use-runtime-dependencies.js';
+import { CreatorSessionProvider } from './creator-session-store.js';
+import type {
+  CreatorRuntimeWorkspace,
+  CreatorSkillLaunch,
+  CreatorWorkspace
+} from './creator-workspace.js';
+import {
+  creatorTemplateForWorkspace,
+  creatorTemplateVersionForWorkspace,
+  isVisibleCreatorWorkspace
+} from './creator-workspace.js';
+import type { VideoMetadataService } from '../../services/video-metadata-service.js';
+import type { CreatorServicesSettingsService } from '../../services/creator-services-service.js';
+import { CreateProjectDropdown } from '../projects/CreateProjectDropdown.js';
+import type { CreatorProjectType } from '../projects/project-types.js';
+import { IssueList } from '../issues/IssuePresenter.js';
+import { usePageIssueState } from '../issues/page-issue-state.js';
+
+type DashboardCategory = '视频创作' | '图像创作' | '文案创作' | '音频处理' | '视频编辑' | '数字人';
+
+type DashboardEntry = {
+  title: string;
+  description: string;
+  prompt: string;
+  category: DashboardCategory;
+  icon: LucideIcon;
+  badge?: 'NEW' | 'HOT';
+  workspace?: CreatorWorkspace;
+};
+
+type FeaturedEntry = Pick<DashboardEntry, 'title' | 'prompt'> & {
+  image: string;
+  accent: 'warm' | 'cyan' | 'neutral';
+  workspace?: CreatorWorkspace;
+};
+
+const featuredTools: FeaturedEntry[] = [
+  {
+    title: '视频翻译配音',
+    image: '/dashboard/templates/video-translation-example.png',
+    prompt: '帮我把这段视频翻译成目标语言，保留原片语气，并生成匹配的字幕和配音。',
+    accent: 'cyan',
+    workspace: 'video-translation'
+  },
+  {
+    title: '封面生成',
+    image: '/dashboard/templates/peter-openclaw-cover.png',
+    prompt: '根据我的内容主题生成一张封面，请先规划标题层级、主体画面、构图和视觉风格。',
+    accent: 'warm',
+    workspace: 'cover-generator'
+  },
+  {
+    title: '图像生成',
+    image: '/dashboard/templates/image-generation-cover.png',
+    prompt: '根据我的创意生成一组图片，请先确认画面主体、风格、构图和使用场景。',
+    accent: 'neutral',
+    workspace: 'image-generation'
+  }
+];
+
+const creatorTools: DashboardEntry[] = [
+  {
+    title: '视频下载',
+    description: '下载公开视频，或提取 MP3 音频',
+    prompt: '帮我下载这个视频链接，支持 YouTube、Bilibili 等平台，并保存为可用的视频文件。',
+    category: '视频编辑',
+    icon: Download,
+    workspace: 'video-download'
+  },
+  {
+    title: '视频翻译',
+    description: '字幕、配音与口型同步',
+    prompt: '帮我把这段视频翻译成目标语言，保留原片语气，并生成匹配的字幕和配音。',
+    category: '视频编辑',
+    icon: Languages,
+    badge: 'HOT',
+    workspace: 'video-translation'
+  },
+  {
+    title: '视频生成',
+    description: '文字或参考图生成视频片段',
+    prompt: '根据我的创意和参考素材生成一段 AI 视频，请先帮我梳理主体动作、镜头和画面风格。',
+    category: '视频创作',
+    icon: WandSparkles,
+    workspace: 'video-generation'
+  },
+  {
+    title: '图像生成',
+    description: '生成创意图片与视觉素材',
+    prompt: '根据我的创意生成一组图片，请先确认画面主体、风格、构图和使用场景。',
+    category: '图像创作',
+    icon: Image,
+    workspace: 'image-generation'
+  },
+  {
+    title: '文章写作',
+    description: '公众号、X 等平台文章',
+    prompt: '帮我根据内容灵感写一篇适合公众号、X 等平台发布的文章，先给出选题和大纲，再完成正文。',
+    category: '文案创作',
+    icon: Newspaper,
+    badge: 'NEW',
+    workspace: 'wechat-article'
+  },
+  {
+    title: '火柴人动画',
+    description: '角色、分镜与完整动画',
+    prompt: '根据我的创意生成一支动画短片，请先帮我完善故事、角色和分镜。',
+    category: '视频创作',
+    icon: Sparkles,
+    workspace: 'stickman-video'
+  },
+  {
+    title: '视频切片',
+    description: 'AI 识别长视频高光片段',
+    prompt: '帮我从这段长视频中识别适合独立传播的高光片段，并生成多个短视频切片。',
+    category: '视频编辑',
+    icon: Clapperboard,
+    workspace: 'auto-clips'
+  },
+  {
+    title: '封面生成',
+    description: '生成视频与内容封面',
+    prompt: '根据我的内容主题生成一张封面，请先规划标题层级、主体画面、构图和视觉风格。',
+    category: '图像创作',
+    icon: ImagePlus,
+    workspace: 'cover-generator'
+  },
+  {
+    title: '小红书帖子',
+    description: '从主题和素材生成完整帖子',
+    prompt: '帮我写一篇小红书帖子，请先确认主题、目标读者、内容类型和篇幅。',
+    category: '文案创作',
+    icon: PenLine,
+    badge: 'NEW',
+    workspace: 'xiaohongshu-post'
+  },
+  {
+    title: '短视频脚本',
+    description: '生成分段口播与画面建议',
+    prompt: '帮我写一份短视频脚本，请先确认主题、目标受众、发布平台、时长和语气。',
+    category: '文案创作',
+    icon: FilePenLine,
+    badge: 'NEW',
+    workspace: 'short-video-script'
+  },
+  {
+    title: '智能配音',
+    description: '自然音色与情绪表达',
+    prompt: '帮我为这段内容制作配音，请根据使用场景优化文本、语速、停顿和情绪。',
+    category: '音频处理',
+    icon: Mic2,
+    workspace: 'smart-dubbing'
+  },
+  {
+    title: '数字人口播',
+    description: '快速制作专业口播',
+    prompt: '帮我制作一支数字人口播视频，请先优化文案，再规划人物、声音和画面。',
+    category: '数字人',
+    icon: UserRound,
+    workspace: 'digital-avatar'
+  }
+];
+
+const categories = ['推荐', '全部', '视频创作', '视频编辑', '图像创作', '文案创作', '音频处理'] as const;
+type CategoryFilter = typeof categories[number];
+const recommendedTabWorkspaces = new Set<CreatorWorkspace>([
+  'video-download',
+  'video-translation',
+  'video-generation',
+  'image-generation'
+]);
+
+const CREATOR_JOB_CREATE_ATTEMPT_TIMEOUT_MS = 4_000;
+const CREATOR_JOB_CREATE_ATTEMPTS = 3;
+const CREATOR_JOB_CREATE_RECOVERY_TIMEOUT_MS = 30_000;
+const CREATOR_JOB_CREATION_STORAGE_PREFIX = 'opencreator.creator.pending-job:';
+
+export default function DashboardPage(props: {
+  onSelectPrompt(prompt: string): void;
+  onBackToHome?(): void;
+  onWorkspaceModeChange?(active: boolean): void;
+  skillLaunch?: CreatorSkillLaunch;
+  creatorServicesService?: CreatorServicesSettingsService | null;
+  gatewayState?: GatewayAccountState | null;
+  gatewayAccountService?: GatewayAccountSettingsService | null;
+  videoMetadataService?: VideoMetadataService;
+  workspace?: CreatorWorkspace;
+  jobId?: string;
+  projectId?: string;
+  creatorService?: CreatorWebService | null;
+  runtimeDependencies?: RuntimeDependenciesController;
+  onJobCreated?(job: CreatorJob): void;
+  onAskIssue?(issue: OpenCreatorIssue, question: string): void;
+  onCreateProject?(projectType: CreatorProjectType): boolean | void | Promise<boolean | void>;
+  createProjectError?: string;
+  onOpenRuntimeComponents?(): void;
+  onWorkspaceNavigate?(
+    workspace: CreatorWorkspace | null,
+    jobId?: string,
+    options?: { replace?: boolean }
+  ): void;
+}) {
+  const { language, t } = useAppLanguage();
+  const l = useLocalizedCopy();
+  const launchIssues = usePageIssueState('creator-launch');
+  const [activeWorkspace, setActiveWorkspace] = useState<CreatorWorkspace | null>(
+    () => props.skillLaunch?.workspace ?? props.workspace ?? null
+  );
+  const [activePromptHint, setActivePromptHint] = useState(
+    () => props.skillLaunch?.promptHint
+  );
+  const [activeJobId, setActiveJobId] = useState(props.jobId);
+  const [workspaceOrigin, setWorkspaceOrigin] = useState<'home' | 'dashboard'>(
+    () => props.skillLaunch === undefined ? 'dashboard' : 'home'
+  );
+  const [category, setCategory] = useState<CategoryFilter>('推荐');
+  const [query, setQuery] = useState('');
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const localize = (value: string) => createLocalizedCopy(language)(value, englishDashboardLabels[value] ?? value);
+  const visibleTools = useMemo(() => creatorTools.filter(tool => {
+    if (tool.workspace === undefined || !isVisibleCreatorWorkspace(tool.workspace)) return false;
+    const matchesCategory = category === '全部'
+      || (category === '推荐' ? recommendedTabWorkspaces.has(tool.workspace) : tool.category === category);
+    const matchesQuery = normalizedQuery.length === 0
+      || `${localize(tool.title)} ${localize(tool.description)} ${localize(tool.category)}`
+        .toLocaleLowerCase()
+        .includes(normalizedQuery);
+    return matchesCategory && matchesQuery;
+  }), [category, language, normalizedQuery]);
+
+  useEffect(() => {
+    if (props.createProjectError === undefined) launchIssues.resolveOperation('creator-launch.create-project');
+    else launchIssues.captureOperationFailure(
+      'creator-launch.create-project',
+      new Error(props.createProjectError),
+      l('新建项目失败，请重试。', 'Could not create the project. Try again.')
+    );
+  }, [
+    l,
+    launchIssues.captureOperationFailure,
+    launchIssues.resolveOperation,
+    props.createProjectError
+  ]);
+
+  useEffect(() => {
+    props.onWorkspaceModeChange?.(activeWorkspace !== null);
+    return () => props.onWorkspaceModeChange?.(false);
+  }, [activeWorkspace, props.onWorkspaceModeChange]);
+
+  useEffect(() => {
+    if (props.skillLaunch?.workspace !== undefined) {
+      setWorkspaceOrigin('home');
+      setActiveWorkspace(props.skillLaunch.workspace);
+      setActivePromptHint(props.skillLaunch.promptHint);
+      return;
+    }
+    setWorkspaceOrigin('dashboard');
+    setActiveWorkspace(props.workspace ?? null);
+  }, [props.skillLaunch?.promptHint, props.skillLaunch?.workspace, props.workspace]);
+
+  useEffect(() => {
+    setActiveJobId(props.jobId);
+  }, [props.jobId]);
+
+  const closeWorkspace = () => {
+    setActiveWorkspace(null);
+    setActivePromptHint(undefined);
+    setActiveJobId(undefined);
+    if (workspaceOrigin === 'home') {
+      props.onBackToHome?.();
+    } else {
+      props.onWorkspaceNavigate?.(null);
+    }
+  };
+
+  const openWorkspace = (workspace: CreatorWorkspace) => {
+    setWorkspaceOrigin('dashboard');
+    setActivePromptHint(undefined);
+    setActiveJobId(undefined);
+    setActiveWorkspace(workspace);
+    props.onWorkspaceNavigate?.(workspace);
+  };
+
+  const handleJobCreated = (workspace: CreatorRuntimeWorkspace, job: CreatorJob) => {
+    setActiveJobId(job.id);
+    props.onJobCreated?.(job);
+    props.onWorkspaceNavigate?.(workspace, job.id, { replace: true });
+  };
+
+  const renderCreatorWorkspace = (workspace: CreatorRuntimeWorkspace, content: ReactNode) => {
+    if (!props.projectId || !props.creatorService) {
+      return (
+        <CreatorRuntimeBlocker
+          reason={props.creatorService ? 'project' : 'runtime'}
+          onBack={closeWorkspace}
+        />
+      );
+    }
+    return (
+      <CreatorWorkspaceSession
+        projectId={props.projectId}
+        service={props.creatorService}
+        templateId={creatorTemplateForWorkspace(workspace)}
+        templateVersion={creatorTemplateVersionForWorkspace(workspace)}
+        jobId={activeJobId}
+        onJobCreated={job => handleJobCreated(workspace, job)}
+        onAskIssue={props.onAskIssue}
+        onBack={closeWorkspace}
+      >
+        <OfficialServicesContext.Provider value={props.gatewayState}>{content}</OfficialServicesContext.Provider>
+      </CreatorWorkspaceSession>
+    );
+  };
+
+  if (activeWorkspace === 'video-translation') {
+    return renderCreatorWorkspace('video-translation', (
+      <VideoTranslationWorkspace
+        runtimeDependencies={props.runtimeDependencies}
+        promptHint={activePromptHint}
+        videoMetadataService={props.videoMetadataService}
+        creatorServicesService={props.creatorServicesService}
+        onBack={closeWorkspace}
+      />
+    ));
+  }
+
+  if (activeWorkspace === 'video-download') {
+    return renderCreatorWorkspace('video-download', (
+      <VideoDownloadBatchWorkspace
+        service={props.creatorService!}
+        promptHint={activePromptHint}
+        runtimeDependencies={props.runtimeDependencies}
+        onOpenRuntimeComponents={props.onOpenRuntimeComponents}
+        onBack={closeWorkspace}
+      />
+    ));
+  }
+
+  if (activeWorkspace === 'smart-dubbing') {
+    return renderCreatorWorkspace('smart-dubbing', (
+      <SmartDubbingWorkspace
+        promptHint={activePromptHint}
+        creatorServicesService={props.creatorServicesService}
+        onBack={closeWorkspace}
+      />
+    ));
+  }
+
+  if (activeWorkspace === 'xiaohongshu-post') {
+    return renderCreatorWorkspace('xiaohongshu-post', (
+      <XiaohongshuPostWorkspace
+        promptHint={activePromptHint}
+        onBack={closeWorkspace}
+      />
+    ));
+  }
+
+  if (activeWorkspace === 'wechat-article') {
+    return renderCreatorWorkspace('wechat-article', (
+      <WechatArticleWorkspace
+        promptHint={activePromptHint}
+        onBack={closeWorkspace}
+      />
+    ));
+  }
+
+  if (activeWorkspace === 'short-video-script') {
+    return renderCreatorWorkspace('short-video-script', (
+      <ShortVideoScriptWorkspace
+        promptHint={activePromptHint}
+        onBack={closeWorkspace}
+      />
+    ));
+  }
+
+  if (activeWorkspace === 'image-generation') {
+    return renderCreatorWorkspace('image-generation', (
+      <ImageGenerationWorkspace
+        promptHint={activePromptHint}
+        creatorServicesService={props.creatorServicesService}
+        onBack={closeWorkspace}
+      />
+    ));
+  }
+
+  if (activeWorkspace === 'video-generation') {
+    return renderCreatorWorkspace('video-generation', (
+      <VideoGenerationWorkspace
+        promptHint={activePromptHint}
+        creatorServicesService={props.creatorServicesService}
+        onBack={closeWorkspace}
+      />
+    ));
+  }
+
+  if (activeWorkspace === 'digital-avatar') {
+    return (
+      <DigitalAvatarWorkspace
+        promptHint={activePromptHint}
+        onBack={closeWorkspace}
+      />
+    );
+  }
+
+  if (activeWorkspace === 'stickman-video') {
+    return renderCreatorWorkspace('stickman-video', (
+      <StickmanVideoWorkspace
+        promptHint={activePromptHint}
+        creatorServicesService={props.creatorServicesService}
+        creatorService={props.creatorService}
+        onBack={closeWorkspace}
+      />
+    ));
+  }
+
+  if (activeWorkspace === 'auto-clips') {
+    return renderCreatorWorkspace('auto-clips', (
+      <AutoClipWorkspace
+        promptHint={activePromptHint}
+        videoMetadataService={props.videoMetadataService}
+        onBack={closeWorkspace}
+      />
+    ));
+  }
+
+  if (activeWorkspace === 'cover-generator') {
+    return renderCreatorWorkspace('cover-generator', (
+      <CoverGeneratorWorkspace
+        promptHint={activePromptHint}
+        onBack={closeWorkspace}
+      />
+    ));
+  }
+
+  return (
+    <main className="opencreator-scroll-page creator-tools-page">
+      <div className="opencreator-page-content creator-tools-page-inner">
+        <header className="creator-tools-page-header">
+          <h1>{t('dashboard.title')}</h1>
+          {props.onCreateProject ? (
+            <CreateProjectDropdown
+              align="end"
+              onCreate={props.onCreateProject}
+            />
+          ) : null}
+        </header>
+        <IssueList issues={launchIssues.issues} onDismiss={launchIssues.dismissIssue} />
+
+        <section className="dashboard-featured" aria-labelledby="dashboard-featured-title">
+          <h2 id="dashboard-featured-title">{t('dashboard.featured')}</h2>
+          <div className="dashboard-featured-grid">
+            {featuredTools.map(tool => (
+              <button
+                className="dashboard-featured-card"
+                data-accent={tool.accent}
+                type="button"
+                key={tool.title}
+                onClick={() => tool.workspace
+                  ? openWorkspace(tool.workspace)
+                  : props.onSelectPrompt(tool.prompt)}
+                aria-label={t('dashboard.openTool', { title: localize(tool.title) })}
+              >
+                <img src={tool.image} alt="" />
+                <span className="dashboard-featured-scrim" aria-hidden="true" />
+                <span className="dashboard-featured-copy">
+                  <strong>{localize(tool.title)}</strong>
+                  <span>
+                    {t('dashboard.start')}
+                    <ArrowUpRight size={14} strokeWidth={1.8} aria-hidden="true" />
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="dashboard-directory" aria-label={t('dashboard.apps')}>
+          <div className="dashboard-directory-controls">
+            <div
+              className="dashboard-category-tabs"
+              role="tablist"
+              aria-label={t('dashboard.categories')}
+            >
+              {categories.map(item => (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={category === item}
+                  key={item}
+                  onClick={() => setCategory(item)}
+                >
+                  {localize(item)}
+                </button>
+              ))}
+            </div>
+            <label className="dashboard-search">
+              <Search size={16} strokeWidth={1.8} aria-hidden="true" />
+              <input
+                type="search"
+                aria-label={t('dashboard.search')}
+                value={query}
+                onChange={event => setQuery(event.target.value)}
+                placeholder={t('dashboard.search')}
+              />
+            </label>
+          </div>
+
+          {visibleTools.length > 0 ? (
+            <div className="dashboard-app-grid">
+              {visibleTools.map(({ title, description, prompt, icon: Icon, badge, workspace }) => (
+                <button
+                  className="dashboard-app-card"
+                  type="button"
+                  key={title}
+                  onClick={() => workspace ? openWorkspace(workspace) : props.onSelectPrompt(prompt)}
+                >
+                  <span className="dashboard-app-icon">
+                    <Icon size={19} strokeWidth={1.7} aria-hidden="true" />
+                  </span>
+                  <span className="dashboard-app-copy">
+                    <span className="dashboard-app-title">
+                      <strong>{localize(title)}</strong>
+                      {badge ? <small>{badge}</small> : null}
+                    </span>
+                    <span>{localize(description)}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="dashboard-empty" role="status">
+              <Search size={20} strokeWidth={1.6} aria-hidden="true" />
+              <p>{t('dashboard.empty')}</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setQuery('');
+                  setCategory('全部');
+                }}
+              >
+                {t('dashboard.showAll')}
+              </button>
+            </div>
+          )}
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function CreatorRuntimeBlocker(props: {
+  reason: 'runtime' | 'project';
+  onBack(): void;
+}) {
+  const l = useLocalizedCopy();
+  const runtimeMissing = props.reason === 'runtime';
+  return (
+    <main className="creator-workspace-page creator-runtime-blocker-page">
+      <section className="creator-runtime-blocker" role="alert">
+        <span aria-hidden="true"><ServerOff size={24} strokeWidth={1.7} /></span>
+        <div>
+          <h1>{runtimeMissing
+            ? l('本地创作服务未连接', 'Local creator service is disconnected')
+            : l('请先选择一个项目', 'Select a project first')}</h1>
+          <p>{runtimeMissing
+            ? l('视频翻译等创作工具必须连接真实 Runtime，当前不会生成替代结果。', 'Creator tools require the real Runtime. Substitute results will not be generated.')
+            : l('创作任务和产出需要保存到项目中，选择项目后再进入工具。', 'Creator jobs and outputs must belong to a project.')}</p>
+        </div>
+        <button type="button" onClick={props.onBack}>{l('返回工作台', 'Back to Dashboard')}</button>
+      </section>
+    </main>
+  );
+}
+
+function CreatorWorkspaceSession(props: {
+  projectId: string;
+  service: CreatorWebService;
+  templateId: string;
+  templateVersion: number;
+  jobId?: string;
+  children: ReactNode;
+  onJobCreated(job: CreatorJob): void;
+  onAskIssue?(issue: OpenCreatorIssue, question: string): void;
+  onBack(): void;
+}) {
+  const l = useLocalizedCopy();
+  const [job, setJob] = useState<CreatorJob | undefined>(() => props.jobId === undefined
+    ? createPendingCreatorJob(props.projectId, props.templateId, props.templateVersion)
+    : undefined);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [restoreConnection, setRestoreConnection] = useState<CreatorConnectionState>({ status: 'connecting', attempt: 0 });
+  const pageIssues = usePageIssueState('creator-launch');
+  const jobRef = useRef(job);
+  const mountedRef = useRef(false);
+  const onJobCreatedRef = useRef(props.onJobCreated);
+  const creationRequestsRef = useRef(new Map<string, Promise<CreatorJob>>());
+  const capturedCreationFailureRef = useRef(new WeakSet<object>());
+  const announcedCreatedJobIdsRef = useRef(new Set<string>());
+  const creationIdentityRef = useRef<{ scope: string; key: string }>();
+  const createdJobIdRef = useRef<string>();
+  const previousRouteJobIdRef = useRef(props.jobId);
+  jobRef.current = job;
+  onJobCreatedRef.current = props.onJobCreated;
+
+  const creationScope = `${props.projectId}:${props.templateId}:${props.templateVersion}`;
+  const startedAnotherNewSession = props.jobId === undefined
+    && previousRouteJobIdRef.current !== undefined;
+  if (
+    props.jobId === undefined
+    && (creationIdentityRef.current?.scope !== creationScope || startedAnotherNewSession)
+  ) {
+    creationIdentityRef.current = {
+      scope: creationScope,
+      key: readOrCreateCreatorJobCreationKey(
+        props.projectId,
+        props.templateId,
+        props.templateVersion
+      )
+    };
+    createdJobIdRef.current = undefined;
+  }
+  previousRouteJobIdRef.current = props.jobId;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  const ensureJob = useCallback(async (state: Record<string, CreatorJson>): Promise<CreatorJob> => {
+    const currentJob = jobRef.current;
+    if (currentJob !== undefined && !isPendingCreatorJob(currentJob)) return currentJob;
+
+    const creationKey = creationIdentityRef.current?.key
+      ?? readOrCreateCreatorJobCreationKey(
+        props.projectId,
+        props.templateId,
+        props.templateVersion
+      );
+    const requestKey = `create:${creationKey}`;
+    let request = creationRequestsRef.current.get(requestKey);
+    if (request === undefined) {
+      request = createCreatorJobWithRecovery(props.service, {
+        projectId: props.projectId,
+        templateId: props.templateId,
+        templateVersion: currentJob?.templateVersion,
+        creationKey,
+        state
+      });
+      creationRequestsRef.current.set(requestKey, request);
+      void request.catch(() => {
+        if (creationRequestsRef.current.get(requestKey) === request) {
+          creationRequestsRef.current.delete(requestKey);
+        }
+      });
+    }
+
+    let next: CreatorJob;
+    try {
+      next = await request;
+      pageIssues.resolveOperation('creator-launch.create-job');
+    } catch (cause) {
+      if (typeof cause === 'object' && cause !== null) capturedCreationFailureRef.current.add(cause);
+      pageIssues.captureOperationFailure(
+        'creator-launch.create-job',
+        cause,
+        l('无法创建创作项目，请检查 Runtime 连接后再次启动。', 'Could not create the creator project. Check the Runtime connection and start it again.')
+      );
+      throw cause;
+    }
+    if (next.projectId !== props.projectId) {
+      throw new Error('Creator job does not belong to the active project');
+    }
+    if (next.templateId !== props.templateId) {
+      throw new Error('Creator job does not match the active template');
+    }
+    if (!mountedRef.current) return next;
+    createdJobIdRef.current = next.id;
+    jobRef.current = next;
+    setJob(next);
+    if (!announcedCreatedJobIdsRef.current.has(next.id)) {
+      announcedCreatedJobIdsRef.current.add(next.id);
+      clearCreatorJobCreationKey(
+        props.projectId,
+        props.templateId,
+        props.templateVersion,
+        creationKey
+      );
+      onJobCreatedRef.current(next);
+    }
+    return next;
+  }, [
+    l,
+    pageIssues.captureOperationFailure,
+    pageIssues.resolveOperation,
+    props.projectId,
+    props.service,
+    props.templateId,
+    props.templateVersion
+  ]);
+
+  useEffect(() => {
+    let canceled = false;
+    if (props.jobId === undefined) {
+      pageIssues.resolveOperation('creator-launch.restore-job');
+      setJob(current => (
+        current !== undefined
+        && isPendingCreatorJob(current)
+        && current.projectId === props.projectId
+        && current.templateId === props.templateId
+        && current.templateVersion === props.templateVersion
+          ? current
+          : createPendingCreatorJob(
+              props.projectId,
+              props.templateId,
+              props.templateVersion
+            )
+      ));
+      return () => { canceled = true; };
+    }
+
+    if (props.jobId !== createdJobIdRef.current) createdJobIdRef.current = undefined;
+    if (jobRef.current?.id === props.jobId) return;
+    const jobId = props.jobId;
+    setJob(current => current?.id === props.jobId ? current : undefined);
+    const subscription = createCreatorSnapshotSubscription<CreatorJob>({
+      loadSnapshot: async options => {
+        const next = (await props.service.getJob(jobId, options)).job;
+        if (next.projectId !== props.projectId || next.templateId !== props.templateId) {
+          throw new ApiClientError({ status: 409, code: 'CREATOR_SESSION_MISMATCH', message: 'This creation project does not match the current working directory or template' });
+        }
+        return next;
+      },
+      subscribe: () => ({ close() {} }),
+      onSnapshot(next) {
+        if (canceled) return;
+        pageIssues.resolveOperation('creator-launch.restore-job');
+        setJob(next);
+        subscription.close();
+      },
+      onState(next) {
+        if (canceled) return;
+        setRestoreConnection(next);
+        if (next.status === 'failed') {
+          pageIssues.captureOperationFailure(
+            'creator-launch.restore-job', next.error,
+            l('无法恢复创作项目，请重试。', 'Could not restore the creator project. Try again.'),
+            { retryable: true }
+          );
+        }
+      }
+    });
+    void subscription.start();
+    return () => {
+      canceled = true;
+      subscription.close();
+    };
+  }, [
+    l,
+    loadAttempt,
+    pageIssues.captureOperationFailure,
+    pageIssues.resolveOperation,
+    props.jobId,
+    props.projectId,
+    props.service,
+    props.templateId,
+    props.templateVersion
+  ]);
+
+  const restoreIssue = pageIssues.issues.some(issue => issue.operation === 'creator-launch.restore-job');
+  if (restoreIssue) {
+    return (
+      <main className="creator-workspace-loading">
+        <RuntimeRecoveryNotice session={restoreConnection} onRetrySession={async () => setLoadAttempt(attempt => attempt + 1)} />
+        <IssueList
+          issues={pageIssues.issues}
+          actions={{ retryOperations: {
+            'creator-launch.restore-job': () => setLoadAttempt(attempt => attempt + 1)
+          } }}
+          onDismiss={pageIssues.dismissIssue}
+        />
+        <div className="creator-workspace-loading-actions">
+          <button type="button" onClick={props.onBack}>{l('返回工作台', 'Back to Dashboard')}</button>
+        </div>
+      </main>
+    );
+  }
+  if (!job) {
+    return (
+      <main className="creator-workspace-loading" aria-busy="true">
+        {l('正在恢复创作项目', 'Restoring creator project')}
+        <RuntimeRecoveryNotice session={restoreConnection} onRetrySession={async () => setLoadAttempt(attempt => attempt + 1)} />
+      </main>
+    );
+  }
+  const creationKey = creationIdentityRef.current?.key;
+  const providerKey = isPendingCreatorJob(job) || createdJobIdRef.current === job.id
+    ? `create:${creationKey ?? creationScope}`
+    : `job:${job.id}`;
+  return (
+    <CreatorSessionProvider
+      key={providerKey}
+      initialJob={job}
+      service={props.service}
+      ensureJob={ensureJob}
+      externalIssues={pageIssues.issues}
+      onAskPendingIssue={props.onAskIssue}
+      onPreJobFailure={(operation, cause, fallbackMessage) => {
+        if (typeof cause === 'object' && cause !== null && capturedCreationFailureRef.current.has(cause)) return;
+        pageIssues.captureOperationFailure(operation, cause, fallbackMessage);
+      }}
+    >
+      {props.children}
+    </CreatorSessionProvider>
+  );
+}
+
+function createPendingCreatorJob(
+  projectId: string,
+  templateId: string,
+  templateVersion: number
+): CreatorJob {
+  const now = new Date().toISOString();
+  return {
+    id: `pending:${projectId}:${templateId}`,
+    projectId,
+    templateId,
+    templateVersion,
+    status: 'draft',
+    revision: 0,
+    state: {},
+    presetOrigin: null,
+    agentThreadId: null,
+    stages: [],
+    artifacts: [],
+    providerRequests: [],
+    activities: [],
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function isPendingCreatorJob(job: CreatorJob): boolean {
+  return job.id.startsWith('pending:');
+}
+
+export async function createCreatorJobWithRecovery(
+  service: CreatorWebService,
+  request: Parameters<CreatorWebService['createJob']>[0]
+): Promise<CreatorJob> {
+  let lastError: unknown;
+  const inFlightRequests: Promise<CreatorJob>[] = [];
+  for (let attempt = 0; attempt < CREATOR_JOB_CREATE_ATTEMPTS; attempt += 1) {
+    const requestWork = service.createJob(request).then(
+      response => response.job,
+      error => {
+        lastError = error;
+        throw error;
+      }
+    );
+    inFlightRequests.push(requestWork);
+    try {
+      return await withTimeout(
+        firstSuccessfulCreatorJob(inFlightRequests, () => lastError),
+        CREATOR_JOB_CREATE_ATTEMPT_TIMEOUT_MS
+      );
+    } catch (error) {
+      lastError = error;
+      if (error instanceof ApiClientError && error.status !== 0) throw error;
+      if (attempt + 1 < CREATOR_JOB_CREATE_ATTEMPTS) {
+        await waitForRetry(250 * (attempt + 1));
+      }
+    }
+  }
+  try {
+    return await withTimeout(
+      firstSuccessfulCreatorJob(inFlightRequests, () => lastError),
+      CREATOR_JOB_CREATE_RECOVERY_TIMEOUT_MS
+    );
+  } catch (error) {
+    throw lastError ?? error;
+  }
+}
+
+function firstSuccessfulCreatorJob(
+  requests: Promise<CreatorJob>[],
+  readLastError: () => unknown
+): Promise<CreatorJob> {
+  return Promise.any(requests).catch(error => {
+    throw readLastError() ?? error;
+  });
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(
+      () => reject(new Error('Creator job creation request timed out')),
+      timeoutMs
+    );
+    promise.then(
+      value => {
+        window.clearTimeout(timeout);
+        resolve(value);
+      },
+      error => {
+        window.clearTimeout(timeout);
+        reject(error);
+      }
+    );
+  });
+}
+
+function waitForRetry(delayMs: number): Promise<void> {
+  return new Promise(resolve => window.setTimeout(resolve, delayMs));
+}
+
+function readOrCreateCreatorJobCreationKey(
+  projectId: string,
+  templateId: string,
+  templateVersion: number
+): string {
+  const storageKey = creatorJobCreationStorageKey(projectId, templateId, templateVersion);
+  try {
+    const existing = window.sessionStorage.getItem(storageKey);
+    if (existing) return existing;
+  } catch {
+    // Continue with an in-memory key when session storage is unavailable.
+  }
+  const key = `creator_create_${createCreationKeySuffix()}`;
+  try {
+    window.sessionStorage.setItem(storageKey, key);
+  } catch {
+    // The caller still keeps the generated key in component memory.
+  }
+  return key;
+}
+
+function clearCreatorJobCreationKey(
+  projectId: string,
+  templateId: string,
+  templateVersion: number,
+  expectedKey?: string
+): void {
+  const storageKey = creatorJobCreationStorageKey(projectId, templateId, templateVersion);
+  try {
+    if (
+      expectedKey === undefined
+      || window.sessionStorage.getItem(storageKey) === expectedKey
+    ) {
+      window.sessionStorage.removeItem(storageKey);
+    }
+  } catch {
+    // Session storage is only a recovery aid.
+  }
+}
+
+function creatorJobCreationStorageKey(
+  projectId: string,
+  templateId: string,
+  templateVersion: number
+): string {
+  return [
+    CREATOR_JOB_CREATION_STORAGE_PREFIX,
+    encodeURIComponent(projectId),
+    ':',
+    encodeURIComponent(templateId),
+    ':',
+    templateVersion
+  ].join('');
+}
+
+function createCreationKeySuffix(): string {
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  if (randomUuid) return randomUuid;
+  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+}
+
+const englishDashboardLabels: Record<string, string> = {
+  推荐: 'Recommended',
+  全部: 'All',
+  内容创作: 'Content Creation',
+  视频创作: 'Video Creation',
+  图像创作: 'Image Creation',
+  文案创作: 'Writing',
+  音频处理: 'Audio',
+  视频编辑: 'Video Editing',
+  数字人: 'Avatars',
+  火柴人动画: 'Stick Figure Animation',
+  视频翻译配音: 'Translate & Dub Video',
+  数字人口播: 'Digital Avatar',
+  视频翻译: 'Video Translation',
+  文章写作: 'Article Writer',
+  '公众号、X 等平台文章': 'Articles for WeChat, X, and more',
+  '字幕、配音与口型同步': 'Subtitles, dubbing, and lip sync',
+  视频生成: 'Video Generation',
+  文字或参考图生成视频片段: 'Generate video clips from text or a reference image',
+  快速制作专业口播: 'Create professional presenter videos quickly',
+  '角色、分镜与完整动画': 'Characters, storyboards, and animation',
+  自动剪辑: 'Auto Clips',
+  语义识别与高光切片: 'Semantic detection and highlight clips',
+  短视频脚本: 'Short Video Script',
+  生成分段口播与画面建议: 'Generate timed narration and visual suggestions',
+  视频切片: 'Video Clips',
+  'AI 识别长视频高光片段': 'Find the strongest moments in long videos with AI',
+  智能配音: 'AI Dubbing',
+  小红书帖子: 'Xiaohongshu Posts',
+  从主题和素材生成完整帖子: 'Turn a topic or source material into a complete post',
+  自然音色与情绪表达: 'Natural voices with expressive delivery',
+  图像生成: 'Image Generation',
+  生成创意图片与视觉素材: 'Generate images and visual assets',
+  封面生成: 'Thumbnail Generator',
+  生成视频与内容封面: 'Create thumbnails for videos and content',
+  视频下载: 'Video Downloader',
+  '下载公开视频，或提取 MP3 音频': 'Download public videos or extract MP3 audio'
+};

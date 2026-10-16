@@ -1,0 +1,437 @@
+import { createDefaultCreatorServicesConfig } from '@opencreator/protocol';
+import Fastify, { type FastifyInstance } from 'fastify';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { registerImageGenerationRoutes } from '../../src/api/routes.image-generation.js';
+import type { CreatorServicesConfigStore } from '../../src/creator-services/config-store.js';
+import { generateImageContents } from '../../src/image-generation/provider.js';
+import { createImageGenerationService } from '../../src/image-generation/service.js';
+import { startCodexExec } from '../../src/codex/runner.js';
+
+describe('image generation API', () => {
+  let server: FastifyInstance;
+  let dataDir: string;
+
+  beforeEach(async () => {
+    server = Fastify({ logger: false });
+    dataDir = await mkdtemp(join(tmpdir(), 'opencreator-image-generation-'));
+  });
+
+  afterEach(async () => {
+    await server.close();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it('generates and serves native ChatGPT artifacts through the existing image API without HTTP fallback', async () => {
+    const home = join(dataDir, 'codex');
+    await mkdir(home);
+    await writeFile(join(home, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'private-oauth-secret' } }));
+    const fixture = fileURLToPath(new URL('../fixtures/fake-codex-image.mjs', import.meta.url));
+    const fetchImpl = vi.fn();
+    await registerImageGenerationRoutes(server, createImageGenerationService({
+      dataDir, configStore: createConfigStore(createDefaultCreatorServicesConfig()), fetchImpl,
+      codexNative: {
+        codexHome: home, codexBin: process.execPath,
+        checkNativeCapability: async () => ({ supported: true }),
+        startExec: input => startCodexExec({ ...input, args: [fixture, ...input.args] })
+      }
+    }));
+    const response = await server.inject({ method: 'POST', url: '/image-generation/results', payload: { prompt: 'An orange cat', provider: 'codex-native', size: '1024x1024', quality: 'medium', count: 1 } });
+    expect(response.statusCode).toBe(201);
+    expect(response.json().result).toMatchObject({ provider: 'codex-native', model: 'codex-native', count: 1 });
+    const content = await server.inject({ method: 'GET', url: `/image-generation/results/${response.json().result.id}/content/0` });
+    expect(content.statusCode).toBe(200);
+    expect(content.headers['content-type']).toBe('image/png');
+    expect(content.rawPayload.subarray(0, 4).toString('hex')).toBe('89504e47');
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(response.body).not.toContain('private-oauth-secret');
+  });
+
+  it('returns a safe upstream code and HTTP status without exposing provider text', async () => {
+    const config = createDefaultCreatorServicesConfig();
+    config.image.openai.apiKey = 'sk-image-test';
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      error: { code: 'rate_limit_exceeded', message: 'secret=private provider payload' }
+    }), { status: 429 }));
+    await registerImageGenerationRoutes(server, createImageGenerationService({
+      dataDir, configStore: createConfigStore(config), fetchImpl: fetchImpl as typeof fetch
+    }));
+
+    const response = await server.inject({
+      method: 'POST', url: '/image-generation/results',
+      payload: { prompt: 'A portrait', provider: 'openai', size: '1024x1024', quality: 'medium', count: 1 }
+    });
+    expect(response.statusCode).toBe(502);
+    expect(response.json().error).toMatchObject({
+      code: 'IMAGE_GENERATION_UPSTREAM_ERROR',
+      publicFacts: { kind: 'rate-limited', provider: 'openai', httpStatus: 429, upstreamCode: 'rate_limit_exceeded' }
+    });
+    expect(JSON.stringify(response.json().error)).not.toContain('private');
+  });
+
+  it('generates, stores, and serves OpenAI-compatible images', async () => {
+    const config = createDefaultCreatorServicesConfig();
+    config.image.openai.apiKey = 'sk-image-test';
+    config.image.openai.baseUrl = 'https://images.example.test/v1';
+    const image = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('test-image')
+    ]);
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      data: [{ b64_json: image.toString('base64') }]
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    await registerImageGenerationRoutes(server, createImageGenerationService({
+      dataDir,
+      configStore: createConfigStore(config),
+      fetchImpl: fetchImpl as typeof fetch,
+      createId: () => 'image_result_1234',
+      now: () => new Date('2026-08-20T00:00:00.000Z')
+    }));
+
+    const generated = await server.inject({
+      method: 'POST',
+      url: '/image-generation/results',
+      payload: { prompt: 'A quiet studio portrait', provider: 'openai', size: '1024x1024', quality: 'high', count: 1 }
+    });
+
+    expect(generated.statusCode).toBe(201);
+    expect(generated.json().result).toMatchObject({
+      id: 'image_result_1234',
+      model: 'gpt-image-1',
+      imageSize: '1024x1024',
+      quality: 'high',
+      count: 1,
+      images: [{ index: 0, mime: 'image/png', size: image.length }]
+    });
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe('https://images.example.test/v1/images/generations');
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toMatchObject({
+      model: 'gpt-image-1',
+      prompt: 'A quiet studio portrait',
+      size: '1024x1024',
+      quality: 'high',
+      n: 1
+    });
+
+    const content = await server.inject({
+      method: 'GET',
+      url: '/image-generation/results/image_result_1234/content/0'
+    });
+    expect(content.statusCode).toBe(200);
+    expect(content.headers['content-type']).toContain('image/png');
+    expect(content.rawPayload).toEqual(image);
+    expect(await readdir(join(dataDir, 'image-generation', 'image_result_1234')))
+      .toEqual(['0.png', 'result.json']);
+  });
+
+  it('generates and stores an image through the local Codex provider', async () => {
+    const config = createDefaultCreatorServicesConfig();
+    config.image.provider = 'codex-native';
+    const image = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('codex-native-image')
+    ]);
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      data: [{ b64_json: image.toString('base64') }]
+    }), { status: 200 }));
+    await registerImageGenerationRoutes(server, createImageGenerationService({
+      dataDir,
+      configStore: createConfigStore(config),
+      fetchImpl: fetchMock as typeof fetch,
+      codexNative: {
+        codexHome: join(dataDir, 'codex-home'),
+        readProvider: async () => ({
+          baseUrl: 'https://forward.example.test/v1',
+          apiKey: 'local-codex-secret',
+          model: 'gpt-image-1'
+        })
+      },
+      createId: () => 'codex_native_1234'
+    }));
+
+    const generated = await server.inject({
+      method: 'POST',
+      url: '/image-generation/results',
+      payload: { prompt: 'An original orange cat', provider: 'codex-native', size: '1024x1024', quality: 'medium', count: 1 }
+    });
+
+    expect(generated.statusCode).toBe(201);
+    expect(generated.json().result).toMatchObject({
+      provider: 'codex-native',
+      model: 'gpt-image-1',
+      images: [{ mime: 'image/png', size: image.length }]
+    });
+    expect(String(fetchMock.mock.calls[0]?.[0]))
+      .toBe('https://forward.example.test/v1/images/generations');
+    const content = await server.inject({
+      method: 'GET',
+      url: '/image-generation/results/codex_native_1234/content/0'
+    });
+    expect(content.statusCode).toBe(200);
+    expect(content.rawPayload).toEqual(image);
+  });
+
+  it('adds v1 to an OpenAI-compatible image provider path without a version', async () => {
+    const config = createDefaultCreatorServicesConfig();
+    config.image.openai.apiKey = 'sk-image-test';
+    config.image.openai.baseUrl = 'https://images.example.test/draw';
+    config.image.openai.model = 'gpt-image-2';
+    const image = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('versioned-image')
+    ]);
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      data: [{ b64_json: image.toString('base64') }]
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    await generateImageContents({
+      prompt: 'A portrait',
+      provider: 'openai',
+      size: '1024x1024',
+      quality: 'high',
+      count: 1
+    }, config, { fetchImpl: fetchImpl as typeof fetch });
+
+    expect(String(fetchImpl.mock.calls[0]?.[0]))
+      .toBe('https://images.example.test/draw/v1/images/generations');
+  });
+
+  it('uses the configured Jimeng Ark image model', async () => {
+    const config = createDefaultCreatorServicesConfig();
+    config.image.jimeng.apiKey = 'ark-test';
+    config.image.jimeng.baseUrl = 'https://ark.example.test/api/v3';
+    const image = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('jimeng')]);
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ data: [{ b64_json: image.toString('base64') }] }), { status: 200 }));
+    await registerImageGenerationRoutes(server, createImageGenerationService({
+      dataDir,
+      configStore: createConfigStore(config),
+      fetchImpl: fetchImpl as typeof fetch,
+      createId: () => 'jimeng_result_1234'
+    }));
+
+    const generated = await server.inject({
+      method: 'POST',
+      url: '/image-generation/results',
+      payload: { prompt: 'Chinese editorial illustration', provider: 'jimeng', size: '1536x1024', quality: 'medium', count: 1 }
+    });
+
+    expect(generated.statusCode).toBe(201);
+    expect(generated.json().result).toMatchObject({ provider: 'jimeng', model: 'doubao-seedream-4-0-250828' });
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe('https://ark.example.test/api/v3/images/generations');
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).not.toHaveProperty('quality');
+  });
+
+  it('keeps configured OpenAI endpoints on the OpenAI edit protocol', async () => {
+    const config = createDefaultCreatorServicesConfig();
+    config.image.openai.apiKey = 'openai-compatible-test';
+    config.image.openai.baseUrl = 'https://forward.krillinai.com/v1/images/generations';
+    config.image.openai.model = 'gpt-image-2';
+    const image = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('openai-compatible-image')
+    ]);
+    const reference = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('character-reference')
+    ]);
+    const styleReference = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('style-reference')
+    ]);
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      data: [{ b64_json: image.toString('base64') }]
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    const result = await generateImageContents({
+      prompt: 'Keep the selected character in a new scene',
+      provider: 'openai',
+      size: '1536x1024',
+      quality: 'medium',
+      count: 1
+    }, config, {
+      fetchImpl: fetchImpl as typeof fetch,
+      referenceImages: [
+        { content: reference, mime: 'image/png' },
+        { content: styleReference, mime: 'image/png' }
+      ]
+    });
+
+    expect(result).toMatchObject({ model: 'gpt-image-2' });
+    expect(result.contents[0]?.content).toEqual(image);
+    expect(String(fetchImpl.mock.calls[0]?.[0]))
+      .toBe('https://forward.krillinai.com/v1/images/edits');
+    expect(fetchImpl.mock.calls[0]?.[1]?.headers).toMatchObject({
+      Authorization: 'Bearer openai-compatible-test',
+      'Content-Type': expect.stringContaining('multipart/form-data; boundary=')
+    });
+    const body = Buffer.from(fetchImpl.mock.calls[0]?.[1]?.body as ArrayBuffer).toString('latin1');
+    expect(body).toContain('gpt-image-2');
+    expect(body.match(/name="image\[\]"/g)).toHaveLength(2);
+    expect(body).not.toContain('name="async"');
+    expect(body.indexOf('character-reference')).toBeLessThan(body.indexOf('style-reference'));
+  });
+
+  it('sends multiple references as ordered image array fields to OpenAI edits', async () => {
+    const config = createDefaultCreatorServicesConfig();
+    config.image.openai.apiKey = 'openai-test';
+    config.image.openai.baseUrl = 'https://images.example.test/v1';
+    const image = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('generated')
+    ]);
+    const character = Buffer.from('character-reference');
+    const style = Buffer.from('style-reference');
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      data: [{ b64_json: image.toString('base64') }]
+    }), { status: 200 }));
+
+    await generateImageContents({
+      prompt: 'Use character identity then visual style',
+      provider: 'openai',
+      size: '1536x1024',
+      quality: 'medium',
+      count: 1
+    }, config, {
+      fetchImpl: fetchImpl as typeof fetch,
+      referenceImages: [
+        { content: character, mime: 'image/png' },
+        { content: style, mime: 'image/jpeg' }
+      ]
+    });
+
+    expect(String(fetchImpl.mock.calls[0]?.[0]))
+      .toBe('https://images.example.test/v1/images/edits');
+    const body = Buffer.from(fetchImpl.mock.calls[0]?.[1]?.body as ArrayBuffer).toString('latin1');
+    expect(body.match(/name="image\[\]"/g)).toHaveLength(2);
+    expect(body.indexOf('character-reference')).toBeLessThan(body.indexOf('style-reference'));
+  });
+
+  it('sends multiple references as ordered Gemini inline data parts', async () => {
+    const config = createDefaultCreatorServicesConfig();
+    config.image.gemini.apiKey = 'gemini-test';
+    config.image.gemini.baseUrl = 'https://gemini.example.test/v1beta';
+    const image = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('gemini-result')
+    ]);
+    const references = [Buffer.from('character'), Buffer.from('style')];
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: image.toString('base64') } }] } }]
+    }), { status: 200 }));
+
+    await generateImageContents({
+      prompt: 'Use ordered references',
+      provider: 'gemini',
+      size: '1536x1024',
+      quality: 'medium',
+      count: 1
+    }, config, {
+      fetchImpl: fetchImpl as typeof fetch,
+      referenceImages: references.map(content => ({ content, mime: 'image/png' as const }))
+    });
+
+    const body = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body));
+    expect(body.contents[0].parts.slice(0, 2)).toEqual(references.map(content => ({
+      inlineData: { mimeType: 'image/png', data: content.toString('base64') }
+    })));
+    expect(body.contents[0].parts[2]).toEqual({ text: 'Use ordered references' });
+  });
+
+  it('extracts inline image data from Gemini', async () => {
+    const config = createDefaultCreatorServicesConfig();
+    config.image.gemini.apiKey = 'gemini-test';
+    config.image.gemini.baseUrl = 'https://gemini.example.test/v1beta';
+    const image = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('gemini')]);
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: image.toString('base64') } }] } }]
+    }), { status: 200 }));
+    await registerImageGenerationRoutes(server, createImageGenerationService({
+      dataDir,
+      configStore: createConfigStore(config),
+      fetchImpl: fetchImpl as typeof fetch,
+      createId: () => 'gemini_result_1234'
+    }));
+
+    const generated = await server.inject({
+      method: 'POST',
+      url: '/image-generation/results',
+      payload: { prompt: 'A clean product image', provider: 'gemini', size: '1024x1536', quality: 'high', count: 1 }
+    });
+
+    expect(generated.statusCode).toBe(201);
+    expect(generated.json().result).toMatchObject({ provider: 'gemini', model: 'gemini-2.5-flash-image' });
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe('https://gemini.example.test/v1beta/models/gemini-2.5-flash-image:generateContent');
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toMatchObject({
+      generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio: '2:3' } }
+    });
+  });
+
+  it('authenticates and downloads a completed Kling image task', async () => {
+    const config = createDefaultCreatorServicesConfig();
+    config.image.kling.accessKey = 'kling-access';
+    config.image.kling.secretKey = 'kling-secret';
+    config.image.kling.baseUrl = 'https://kling.example.test';
+    const image = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('kling')]);
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, _init?: RequestInit) => String(url) === 'https://cdn.example.test/kling.png'
+      ? new Response(image, { status: 200, headers: { 'Content-Type': 'image/png' } })
+      : new Response(JSON.stringify({
+        data: {
+          task_id: 'kling_image_task',
+          task_status: 'succeed',
+          task_result: { images: [{ url: 'https://cdn.example.test/kling.png' }] }
+        }
+      }), { status: 200 }));
+    await registerImageGenerationRoutes(server, createImageGenerationService({
+      dataDir,
+      configStore: createConfigStore(config),
+      fetchImpl: fetchImpl as typeof fetch,
+      createId: () => 'kling_result_1234'
+    }));
+
+    const generated = await server.inject({
+      method: 'POST',
+      url: '/image-generation/results',
+      payload: { prompt: 'A cinematic character', provider: 'kling', size: '1024x1024', quality: 'medium', count: 1 }
+    });
+
+    expect(generated.statusCode).toBe(201);
+    expect(generated.json().result).toMatchObject({ provider: 'kling', model: 'kling-v2-1' });
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe('https://kling.example.test/v1/images/generations');
+    expect((fetchImpl.mock.calls[0]?.[1]?.headers as Record<string, string>).Authorization).toMatch(/^Bearer /);
+  });
+
+  it('validates requests and requires image service configuration', async () => {
+    const config = createDefaultCreatorServicesConfig();
+    await registerImageGenerationRoutes(server, createImageGenerationService({
+      dataDir,
+      configStore: createConfigStore(config),
+      fetchImpl: vi.fn() as typeof fetch
+    }));
+
+    const invalid = await server.inject({
+      method: 'POST',
+      url: '/image-generation/results',
+      payload: { prompt: '', provider: 'unknown', size: 'tiny', quality: 'high', count: 0 }
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json().error.code).toBe('VALIDATION_FAILED');
+
+    const missingConfig = await server.inject({
+      method: 'POST',
+      url: '/image-generation/results',
+      payload: { prompt: 'A real prompt', provider: 'openai', size: '1024x1024', quality: 'medium', count: 1 }
+    });
+    expect(missingConfig.statusCode).toBe(409);
+    expect(missingConfig.json().error.code).toBe('IMAGE_GENERATION_CONFIG_REQUIRED');
+  });
+});
+
+function createConfigStore(config: ReturnType<typeof createDefaultCreatorServicesConfig>): CreatorServicesConfigStore {
+  return {
+    read: vi.fn(async () => config),
+    write: vi.fn(async next => next),
+    reset: vi.fn(async () => createDefaultCreatorServicesConfig())
+  };
+}
