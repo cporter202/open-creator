@@ -37,15 +37,18 @@ ANCHORS = [
 
 
 def fix_badges(text):
-    """Point the stars badge at OUR repo and drop upstream's award badges."""
-    # Stars badge -> our repo, so it shows OUR real star count
-    text = text.replace('badgen.net/github/stars/krillinai/OpenCreator',
-                        'badgen.net/github/stars/cporter202/open-creator')
-    text = text.replace('https://github.com/krillinai/OpenCreator/stargazers',
-                        'https://github.com/cporter202/open-creator/stargazers')
+    """Drop the stars badge entirely and remove upstream's award badges."""
+    # Remove the GitHub Stars badge line (no backslashes needed)
+    lines = text.split(chr(10))
+    lines = [l for l in lines if 'GitHub Stars' not in l]
+    text = chr(10).join(lines)
     # TrendShift "#1 repo of the day" award badge -> theirs, not ours; drop it
-    text = re.sub(r'<a href="https://trendshift\.io[^>]*>.*?</a>\s*\n?', '', text, flags=re.DOTALL)
-    return text
+    keep = []
+    for l in text.split(chr(10)):
+        if 'trendshift.io' in l:
+            continue
+        keep.append(l)
+    return chr(10).join(keep)
 
 
 def main():
