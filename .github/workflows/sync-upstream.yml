@@ -56,7 +56,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No upstream changes — nothing to do."
           else
-            git commit -m "Sync upstream OpenCreator ($(date -u +%Y-%m-%d)) + Apify promo"
+            git commit -m "Sync upstream OpenCreator ($(date -u +%Y-%m-%d))"
             git push origin HEAD:main
             echo "Synced and pushed."
           fi
