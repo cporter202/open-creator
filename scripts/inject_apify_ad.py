@@ -44,7 +44,7 @@ def fix_badges(text):
     text = text.replace('https://github.com/krillinai/OpenCreator/stargazers',
                         'https://github.com/cporter202/open-creator/stargazers')
     # TrendShift "#1 repo of the day" award badge -> theirs, not ours; drop it
-    text = re.sub(r'<a href="https://trendshift\\.io[^>]*>.*?</a>\\s*\\n?', '', text, flags=re.DOTALL)
+    text = re.sub(r'<a href="https://trendshift\.io[^>]*>.*?</a>\s*\n?', '', text, flags=re.DOTALL)
     return text
 
 
