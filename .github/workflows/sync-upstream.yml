@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: write
-  workflows: write
 
 jobs:
   sync:
@@ -45,6 +44,9 @@ jobs:
           cp /tmp/keep/.github/workflows/sync-upstream.yml .github/workflows/
           cp /tmp/keep/scripts/inject_apify_ad.py scripts/
           cp /tmp/keep/ATTRIBUTION.md . 2>/dev/null || true
+          # Drop upstream's own CI workflows (their CI doesn't run here,
+          # and pushing workflow files needs elevated token permission)
+          find .github/workflows -type f ! -name 'sync-upstream.yml' -delete
 
           # Re-apply the Apify promo block (idempotent)
           python3 scripts/inject_apify_ad.py
