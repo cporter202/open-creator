@@ -275,7 +275,7 @@ Sources vidéo prises en charge :
 
 La disponibilité dépend de la vidéo et de la région ; certaines sources peuvent nécessiter des cookies de la plateforme. OpenCreator n'importe pas automatiquement les cookies du navigateur.
 
-![Sélection du format dans l'outil de téléchargement vidéo OpenCreator](../images/examples/video-downloader-formats-en.png)
+![Sélection du format dans l'outil de téléchargement vidéo OpenCreator](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### Génération vidéo
 
@@ -558,7 +558,7 @@ Le fichier `README.md` situé à la racine est le document anglais de référenc
 
 ## Communauté
 
-<p>OpenCreator a reçu des étoiles d’utilisateurs GitHub dans <strong>au moins 100 pays et régions</strong>.</p>
+<p>OpenCreator a reçu des étoiles d’utilisateurs GitHub dans <strong>au moins 104 pays et régions</strong>.</p>
 
 <img src="../images/star-coverage-map.svg" alt="Carte du monde indiquant les pays et régions des utilisateurs GitHub ayant attribué une étoile à OpenCreator" width="760" />
 

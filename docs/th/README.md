@@ -249,7 +249,7 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 การใช้งานขึ้นอยู่กับวิดีโอและภูมิภาค บางแหล่งอาจต้องใช้คุกกี้ของแพลตฟอร์ม
 
-![การเลือกรูปแบบดาวน์โหลดวิดีโอ OpenCreator](../images/examples/video-downloader-formats-en.png)
+![การเลือกรูปแบบดาวน์โหลดวิดีโอ OpenCreator](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### สร้างวิดีโอ
 
@@ -534,7 +534,7 @@ pnpm --filter @opencreator/daemon test -- test/smoke/real-codex-smoke.test.ts
 
 ## ชุมชน
 
-<p>ผู้ใช้ GitHub จาก<strong>อย่างน้อย 100 ประเทศและภูมิภาค</strong>ได้ให้ Star กับ OpenCreator</p>
+<p>ผู้ใช้ GitHub จาก<strong>อย่างน้อย 104 ประเทศและภูมิภาค</strong>ได้ให้ Star กับ OpenCreator</p>
 
 <img src="../images/star-coverage-map.svg" alt="แผนที่โลกแสดงประเทศและภูมิภาคที่มีผู้ให้ GitHub Star แก่ OpenCreator" width="760" />
 

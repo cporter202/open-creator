@@ -277,7 +277,7 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 实际可用性取决于视频和地区；部分来源可能需要平台 Cookie。
 
-![OpenCreator 视频下载格式选择](../images/examples/video-downloader-formats-en.png)
+![OpenCreator 视频下载格式选择](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### 视频生成
 
@@ -561,7 +561,7 @@ pnpm --filter @opencreator/daemon test -- test/smoke/real-codex-smoke.test.ts
 
 ## 社区
 
-<p>来自<strong>至少 100 个国家和地区</strong>的 GitHub 用户为 OpenCreator 点亮了 Star。</p>
+<p>来自<strong>至少 104 个国家和地区</strong>的 GitHub 用户为 OpenCreator 点亮了 Star。</p>
 
 <img src="../images/star-coverage-map.svg" alt="世界地图：标出有 GitHub 用户为 OpenCreator 点亮 Star 的国家和地区" width="760" />
 

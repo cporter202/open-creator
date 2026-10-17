@@ -275,7 +275,7 @@ Unterstützte Videoquellen:
 
 Die Verfügbarkeit hängt vom Video und der Region ab; manche Quellen können Plattform-Cookies erfordern. OpenCreator importiert Browser-Cookies nicht automatisch.
 
-![Formatauswahl im OpenCreator Video-Downloader](../images/examples/video-downloader-formats-en.png)
+![Formatauswahl im OpenCreator Video-Downloader](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### Videogenerierung
 
@@ -558,7 +558,7 @@ Die Datei `README.md` im Stammverzeichnis ist das maßgebliche englische Dokumen
 
 ## Community
 
-<p>GitHub-Nutzer aus <strong>mindestens 100 Ländern und Regionen</strong> haben OpenCreator mit einem Star ausgezeichnet.</p>
+<p>GitHub-Nutzer aus <strong>mindestens 104 Ländern und Regionen</strong> haben OpenCreator mit einem Star ausgezeichnet.</p>
 
 <img src="../images/star-coverage-map.svg" alt="Weltkarte mit Ländern und Regionen, aus denen GitHub-Nutzer OpenCreator einen Star gegeben haben" width="760" />
 

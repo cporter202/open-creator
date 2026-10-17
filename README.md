@@ -13,6 +13,7 @@
 
 <p><strong>OpenCreator was formerly known as KrillinAI.</strong></p>
 
+
 **English** | [简体中文](./docs/zh/README.md) | [日本語](./docs/ja/README.md) | [한국어](./docs/ko/README.md) | [Bahasa Indonesia](./docs/id/README.md) | [Español](./docs/es/README.md) | [Français](./docs/fr/README.md) | [Deutsch](./docs/de/README.md) | [Português](./docs/pt/README.md) | [Русский](./docs/ru/README.md) | [العربية](./docs/ar/README.md) | [ภาษาไทย](./docs/th/README.md) | [Türkçe](./docs/tr/README.md) | [हिन्दी](./docs/hi/README.md) | [বাংলা](./docs/bn/README.md) | [اردو](./docs/ur/README.md) | [Tiếng Việt](./docs/vi/README.md) | [Filipino](./docs/fil/README.md)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
@@ -288,7 +289,7 @@ Supported video sources:
 
 Availability varies by video and region; some sources may require platform cookies.
 
-![OpenCreator Video Downloader format selection](./docs/images/examples/video-downloader-formats-en.png)
+![OpenCreator Video Downloader format selection](./docs/images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### Video Generation
 
@@ -588,7 +589,7 @@ The root `README.md` is the canonical English document. Maintained translations 
 
 ## Community
 
-<p>GitHub users from <strong>at least 100 countries and regions</strong> have starred OpenCreator.</p>
+<p>GitHub users from <strong>at least 104 countries and regions</strong> have starred OpenCreator.</p>
 
 
 ### The Crew

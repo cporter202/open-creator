@@ -275,7 +275,7 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 利用できるかどうかは動画や地域によって異なり、一部のサイトでは Cookie が必要な場合があります。OpenCreator はブラウザーの Cookie を自動で読み込みません。
 
-![OpenCreator 動画ダウンロードの形式選択](../images/examples/video-downloader-formats-en.png)
+![OpenCreator 動画ダウンロードの形式選択](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### 動画生成
 
@@ -558,7 +558,7 @@ pnpm --filter @opencreator/daemon test -- test/smoke/real-codex-smoke.test.ts
 
 ## コミュニティ
 
-<p>OpenCreator は<strong>少なくとも100の国と地域</strong>の GitHub ユーザーから Star を獲得しています。</p>
+<p>OpenCreator は<strong>少なくとも104の国と地域</strong>の GitHub ユーザーから Star を獲得しています。</p>
 
 <img src="../images/star-coverage-map.svg" alt="OpenCreator に Star を付けた GitHub ユーザーの国と地域を示す世界地図" width="760" />
 

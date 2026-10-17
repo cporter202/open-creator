@@ -275,7 +275,7 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 Доступность зависит от видео и региона; некоторым источникам могут потребоваться cookie платформы. OpenCreator не импортирует cookie браузера автоматически.
 
-![Выбор формата в загрузчике видео OpenCreator](../images/examples/video-downloader-formats-en.png)
+![Выбор формата в загрузчике видео OpenCreator](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### Генерация видео
 
@@ -558,7 +558,7 @@ pnpm --filter @opencreator/daemon test -- test/smoke/real-codex-smoke.test.ts
 
 ## Сообщество
 
-<p>Пользователи GitHub как минимум из <strong>100 стран и регионов</strong> поставили OpenCreator звезду.</p>
+<p>Пользователи GitHub как минимум из <strong>104 стран и регионов</strong> поставили OpenCreator звезду.</p>
 
 <img src="../images/star-coverage-map.svg" alt="Карта мира с отмеченными странами и регионами пользователей GitHub, поставивших звезду OpenCreator" width="760" />
 

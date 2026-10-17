@@ -257,7 +257,7 @@ Desteklenen video kaynakları:
 
 Kullanılabilirlik videoya ve bölgeye göre değişir; bazı kaynaklar platform çerezleri gerektirebilir.
 
-![OpenCreator Video Downloader format seçimi](../images/examples/video-downloader-formats-en.png)
+![OpenCreator Video Downloader format seçimi](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### Video Üretimi
 
@@ -549,7 +549,7 @@ Kök `README.md` dosyası kanonik İngilizce belgedir. Bakımı yapılan çeviri
 
 ## Topluluk
 
-<p>GitHub'da OpenCreator'a <strong>en az 100 ülke ve bölgeden</strong> kullanıcı yıldız vermiştir.</p>
+<p>GitHub'da OpenCreator'a <strong>en az 104 ülke ve bölgeden</strong> kullanıcı yıldız vermiştir.</p>
 
 <img src="../images/star-coverage-map.svg" alt="OpenCreator GitHub yıldızlarının geldiği ülke ve bölgeleri gösteren dünya haritası" width="760" />
 

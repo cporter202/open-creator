@@ -321,7 +321,7 @@ Nguồn video hỗ trợ:
 
 Khả dụng tùy video và khu vực; một số nguồn cần cookie nền tảng.
 
-![Chọn định dạng trong trình tải video OpenCreator](../images/examples/video-downloader-formats-en.png)
+![Chọn định dạng trong trình tải video OpenCreator](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 <a id="video-generation"></a>
 
@@ -671,7 +671,7 @@ pnpm --filter @opencreator/daemon test -- test/smoke/real-codex-smoke.test.ts
 
 ## Cộng đồng
 
-<p>Người dùng GitHub từ <strong>ít nhất 100 quốc gia và vùng lãnh thổ</strong> đã gắn sao OpenCreator.</p>
+<p>Người dùng GitHub từ <strong>ít nhất 104 quốc gia và vùng lãnh thổ</strong> đã gắn sao OpenCreator.</p>
 
 <img src="../images/star-coverage-map.svg" alt="Bản đồ quốc gia và vùng lãnh thổ có người gắn sao OpenCreator trên GitHub" width="760" />
 

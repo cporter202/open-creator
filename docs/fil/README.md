@@ -321,7 +321,7 @@ Mga sinusuportahang pinagmumulan:
 
 Nag-iiba ang availability ayon sa video at rehiyon; maaaring kailanganin ang platform cookie.
 
-![Pagpili ng format sa Video Downloader](../images/examples/video-downloader-formats-en.png)
+![Pagpili ng format sa Video Downloader](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 <a id="video-generation"></a>
 
@@ -671,7 +671,7 @@ Ang root na `README.md` ang pamantayang dokumento sa English. Nasa `docs/<locale
 
 ## Komunidad
 
-<p>May GitHub user mula sa <strong>hindi bababa sa 100 bansa at rehiyon</strong> na nag-star sa OpenCreator.</p>
+<p>May GitHub user mula sa <strong>hindi bababa sa 104 bansa at rehiyon</strong> na nag-star sa OpenCreator.</p>
 
 <img src="../images/star-coverage-map.svg" alt="Mapa ng mga bansa at rehiyon na may nag-star sa OpenCreator sa GitHub" width="760" />
 

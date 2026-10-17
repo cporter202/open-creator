@@ -275,7 +275,7 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 يعتمد توفر التنزيل على الفيديو والمنطقة؛ وقد تتطلب بعض المصادر ملفات تعريف الارتباط الخاصة بالمنصة. لا يستورد OpenCreator ملفات تعريف الارتباط من المتصفح تلقائيًا.
 
-![اختيار تنسيق تنزيل الفيديو في OpenCreator](../images/examples/video-downloader-formats-en.png)
+![اختيار تنسيق تنزيل الفيديو في OpenCreator](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### إنشاء الفيديو
 
@@ -558,7 +558,7 @@ pnpm --filter @opencreator/daemon test -- test/smoke/real-codex-smoke.test.ts
 
 ## المجتمع
 
-<p>منح مستخدمو GitHub من <strong>100 دولة ومنطقة على الأقل</strong> مشروع OpenCreator نجمة.</p>
+<p>منح مستخدمو GitHub من <strong>104 دولة ومنطقة على الأقل</strong> مشروع OpenCreator نجمة.</p>
 
 <img src="../images/star-coverage-map.svg" alt="خريطة عالمية تُبرز بلدان ومناطق مستخدمي GitHub الذين منحوا OpenCreator نجمة" width="760" />
 

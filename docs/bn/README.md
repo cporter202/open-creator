@@ -321,7 +321,7 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 ভিডিও ও অঞ্চল অনুযায়ী প্রাপ্যতা বদলায়; কিছু উৎসে প্ল্যাটফর্ম কুকি লাগে।
 
-![OpenCreator ভিডিও ডাউনলোডের ফরম্যাট নির্বাচন](../images/examples/video-downloader-formats-en.png)
+![OpenCreator ভিডিও ডাউনলোডের ফরম্যাট নির্বাচন](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 <a id="video-generation"></a>
 
@@ -671,7 +671,7 @@ pnpm --filter @opencreator/daemon test -- test/smoke/real-codex-smoke.test.ts
 
 ## কমিউনিটি
 
-<p><strong>অন্তত 100 দেশ ও অঞ্চলের</strong> GitHub ব্যবহারকারী OpenCreator-কে স্টার দিয়েছেন।</p>
+<p><strong>অন্তত 104 দেশ ও অঞ্চলের</strong> GitHub ব্যবহারকারী OpenCreator-কে স্টার দিয়েছেন।</p>
 
 <img src="../images/star-coverage-map.svg" alt="OpenCreator-কে GitHub স্টার দেওয়া দেশ ও অঞ্চলের মানচিত্র" width="760" />
 

@@ -275,7 +275,7 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 이용 가능 여부는 동영상과 지역에 따라 다르며 일부 플랫폼에는 쿠키가 필요할 수 있습니다. OpenCreator는 브라우저 쿠키를 자동으로 가져오지 않습니다.
 
-![OpenCreator 비디오 다운로더 형식 선택](../images/examples/video-downloader-formats-en.png)
+![OpenCreator 비디오 다운로더 형식 선택](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### 동영상 생성
 
@@ -558,7 +558,7 @@ pnpm --filter @opencreator/daemon test -- test/smoke/real-codex-smoke.test.ts
 
 ## 커뮤니티
 
-<p>OpenCreator는 <strong>최소 100개 국가 및 지역</strong>의 GitHub 사용자에게서 Star를 받았습니다.</p>
+<p>OpenCreator는 <strong>최소 104개 국가 및 지역</strong>의 GitHub 사용자에게서 Star를 받았습니다.</p>
 
 <img src="../images/star-coverage-map.svg" alt="OpenCreator에 Star를 준 GitHub 사용자의 국가와 지역을 표시한 세계 지도" width="760" />
 

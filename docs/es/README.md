@@ -275,7 +275,7 @@ Fuentes de vídeo compatibles:
 
 La disponibilidad depende del vídeo y la región; algunas fuentes pueden requerir cookies de la plataforma. OpenCreator no importa automáticamente las cookies del navegador.
 
-![Selección de formatos del descargador de vídeos de OpenCreator](../images/examples/video-downloader-formats-en.png)
+![Selección de formatos del descargador de vídeos de OpenCreator](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 ### Generación de vídeos
 
@@ -558,7 +558,7 @@ El archivo `README.md` de la raíz es el documento canónico en inglés. Las tra
 
 ## Comunidad
 
-<p>Usuarios de GitHub de <strong>al menos 100 países y regiones</strong> han dado una estrella a OpenCreator.</p>
+<p>Usuarios de GitHub de <strong>al menos 104 países y regiones</strong> han dado una estrella a OpenCreator.</p>
 
 <img src="../images/star-coverage-map.svg" alt="Mapa mundial con los países y regiones de usuarios de GitHub que dieron una estrella a OpenCreator" width="760" />
 

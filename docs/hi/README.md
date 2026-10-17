@@ -321,7 +321,7 @@ https://github.com/user-attachments/assets/c2c7b528-0ef8-4ba9-b8ac-f9f92f6d4e71
 
 उपलब्धता वीडियो और क्षेत्र के अनुसार बदलती है; कुछ स्रोतों को प्लेटफ़ॉर्म कुकी चाहिए।
 
-![OpenCreator वीडियो डाउनलोडर प्रारूप चयन](../images/examples/video-downloader-formats-en.png)
+![OpenCreator वीडियो डाउनलोडर प्रारूप चयन](../images/examples/video-downloader-formats-and-subtitles-en.png)
 
 <a id="video-generation"></a>
 
@@ -671,7 +671,7 @@ pnpm --filter @opencreator/daemon test -- test/smoke/real-codex-smoke.test.ts
 
 ## समुदाय
 
-<p><strong>कम-से-कम 100 देशों और क्षेत्रों</strong> के GitHub उपयोगकर्ताओं ने OpenCreator को स्टार दिया है।</p>
+<p><strong>कम-से-कम 104 देशों और क्षेत्रों</strong> के GitHub उपयोगकर्ताओं ने OpenCreator को स्टार दिया है।</p>
 
 <img src="../images/star-coverage-map.svg" alt="OpenCreator को GitHub स्टार देने वाले देशों और क्षेत्रों का मानचित्र" width="760" />
 
