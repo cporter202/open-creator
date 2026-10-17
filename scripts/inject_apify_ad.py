@@ -85,6 +85,19 @@ def inject_banner(text):
         lines.extend(['', BANNER_BLOCK])
     return chr(10).join(lines) + chr(10)
 
+def fix_badges(text):
+    """Drop the stars badge entirely and remove upstream's award badges."""
+    lines = text.split(chr(10))
+    lines = [l for l in lines if 'GitHub Stars' not in l]
+    text = chr(10).join(lines)
+    keep = []
+    for l in text.split(chr(10)):
+        if 'trendshift.io' in l:
+            continue
+        keep.append(l)
+    return chr(10).join(keep)
+
+
 def main():
     try:
         with open(README, encoding="utf-8") as f:
