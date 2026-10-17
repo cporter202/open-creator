@@ -69,30 +69,21 @@ def strip_block(text, start, end):
 
 
 def inject_banner(text):
+    # Subtle placement: bottom of the README, just above the License section.
     text = strip_block(text, BANNER_START, BANNER_END)
-    idx = text.find(START)  # right before the Apify promo block
-    if idx != -1:
-        return text[:idx] + BANNER_BLOCK + chr(10) + text[idx:]
-    for anchor in ANCHORS:  # fallback: hero anchor like the promo
-        i2 = text.find(anchor)
-        if i2 != -1:
-            return text[:i2] + BANNER_BLOCK + chr(10) + text[i2:]
-    return BANNER_BLOCK + chr(10) + text
-
-def fix_badges(text):
-    """Drop the stars badge entirely and remove upstream's award badges."""
-    # Remove the GitHub Stars badge line (no backslashes needed)
     lines = text.split(chr(10))
-    lines = [l for l in lines if 'GitHub Stars' not in l]
-    text = chr(10).join(lines)
-    # TrendShift "#1 repo of the day" award badge -> theirs, not ours; drop it
-    keep = []
-    for l in text.split(chr(10)):
-        if 'trendshift.io' in l:
-            continue
-        keep.append(l)
-    return chr(10).join(keep)
-
+    lic = [i for i, l in enumerate(lines)
+           if re.match(r'^#{1,3}\s+licen[sc]e\b', l.strip(), re.I)]
+    if lic:
+        i = lic[-1]
+        while i > 0 and lines[i-1].strip() == '':
+            i -= 1
+        lines[i:i] = ['', BANNER_BLOCK, '']
+    else:
+        while lines and lines[-1].strip() == '':
+            lines.pop()
+        lines.extend(['', BANNER_BLOCK])
+    return chr(10).join(lines) + chr(10)
 
 def main():
     try:
