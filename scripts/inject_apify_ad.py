@@ -36,6 +36,49 @@ ANCHORS = [
 
 
 
+
+BANNER_START = "<!-- AIWITHCHRIS-BANNER-START -->"
+BANNER_END = "<!-- AIWITHCHRIS-BANNER-END -->"
+
+BANNER_BLOCK = """<!-- AIWITHCHRIS-BANNER-START -->
+<p align="center">
+  <a href="https://aiwithchris.com" target="_blank" rel="noopener">
+    <img src=".github/assets/ai-toolkit-banner.png" alt="Hey, I'm Chris — Work Smarter, Create Faster, Earn More With AI. Join my AI Playbook at aiwithchris.com, $10/month" width="100%">
+  </a>
+</p>
+<p align="center">
+  <a href="https://aiwithchris.com"><strong>\U0001F680 Join my AI Playbook — aiwithchris.com</strong></a><br>
+  $10/month \u00b7 3,600+ prompts \u00b7 agent workflows \u00b7 repo breakdowns \u00b7 money ideas
+</p>
+<!-- AIWITHCHRIS-BANNER-END -->
+"""
+
+
+def strip_block(text, start, end):
+    out, skipping = [], False
+    for line in text.split(chr(10)):
+        if start in line:
+            skipping = True
+            continue
+        if end in line:
+            skipping = False
+            continue
+        if not skipping:
+            out.append(line)
+    return chr(10).join(out)
+
+
+def inject_banner(text):
+    text = strip_block(text, BANNER_START, BANNER_END)
+    idx = text.find(START)  # right before the Apify promo block
+    if idx != -1:
+        return text[:idx] + BANNER_BLOCK + chr(10) + text[idx:]
+    for anchor in ANCHORS:  # fallback: hero anchor like the promo
+        i2 = text.find(anchor)
+        if i2 != -1:
+            return text[:i2] + BANNER_BLOCK + chr(10) + text[i2:]
+    return BANNER_BLOCK + chr(10) + text
+
 def fix_badges(text):
     """Drop the stars badge entirely and remove upstream's award badges."""
     # Remove the GitHub Stars badge line (no backslashes needed)
@@ -76,6 +119,7 @@ def main():
         text = PROMO + "\n" + text
         print("promo inserted at top of file (no anchor found)")
 
+    text = inject_banner(text)
     text = fix_badges(text)
 
     with open(README, "w", encoding="utf-8") as f:
