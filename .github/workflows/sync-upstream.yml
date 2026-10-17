@@ -26,10 +26,11 @@ jobs:
           git config user.email "cporter202-sync@users.noreply.github.com"
 
           # Stash our own automation files so the wipe below doesn't kill them
-          mkdir -p /tmp/keep/.github/workflows /tmp/keep/scripts
+          mkdir -p /tmp/keep/.github/workflows /tmp/keep/scripts /tmp/keep/.github/assets
           cp .github/workflows/sync-upstream.yml /tmp/keep/.github/workflows/ 2>/dev/null || true
           cp scripts/inject_apify_ad.py /tmp/keep/scripts/ 2>/dev/null || true
           cp ATTRIBUTION.md /tmp/keep/ 2>/dev/null || true
+          cp .github/assets/ai-toolkit-banner.png /tmp/keep/.github/assets/ 2>/dev/null || true
 
           # Fresh shallow copy of upstream (no history needed)
           rm -rf /tmp/upstream
@@ -40,10 +41,11 @@ jobs:
           tar -C /tmp/upstream --exclude=.git -cf - . | tar -xf - .
 
           # Restore our automation files
-          mkdir -p .github/workflows scripts
+          mkdir -p .github/workflows scripts .github/assets
           cp /tmp/keep/.github/workflows/sync-upstream.yml .github/workflows/
           cp /tmp/keep/scripts/inject_apify_ad.py scripts/
           cp /tmp/keep/ATTRIBUTION.md . 2>/dev/null || true
+          cp /tmp/keep/.github/assets/ai-toolkit-banner.png .github/assets/ 2>/dev/null || true
           # Drop upstream's own CI workflows (their CI doesn't run here,
           # and pushing workflow files needs elevated token permission)
           find .github/workflows -type f ! -name 'sync-upstream.yml' -delete
