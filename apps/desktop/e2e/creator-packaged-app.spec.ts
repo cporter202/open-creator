@@ -687,9 +687,15 @@ test('@package-smoke 实际 Desktop 包创建并重启恢复 Creator Job，且�
         runtimeManifest.ytDlp.certificateBundle
       ])
     );
+    const buildManifest = JSON.parse(readFileSync(
+      process.env.OPENCREATOR_DESKTOP_BUILD_MANIFEST
+        ?? join(desktopDir, 'release', 'opencreator-desktop-build-manifest.json'),
+      'utf8'
+    )) as { ytDlpVersion: string };
+    expect(buildManifest.ytDlpVersion).toMatch(/^\d{4}\.\d{2}\.\d{2}\.\d{6}$/);
     expect(runtimeManifest.ytDlp).toMatchObject({
       mode: 'python',
-      version: '2026.08.29.232711',
+      version: buildManifest.ytDlpVersion,
       pythonVersion: '3.13.15',
       javascriptRuntime: { name: 'node', version: '22.23.2' }
     });
@@ -851,8 +857,8 @@ test('@package-smoke 实际 Desktop 包创建并重启恢复 Creator Job，且�
     expect(ytDlpStatus.body.ytDlp).toMatchObject({
       channel: 'nightly',
       source: 'bundled',
-      currentVersion: '2026.08.29.232711',
-      bundledVersion: '2026.08.29.232711'
+      currentVersion: buildManifest.ytDlpVersion,
+      bundledVersion: buildManifest.ytDlpVersion
     });
     expect(typeof ytDlpStatus.body.ytDlp.updateAvailable).toBe('boolean');
     if (ytDlpStatus.body.ytDlp.updateAvailable) {
@@ -910,20 +916,18 @@ test('@package-smoke 实际 Desktop 包创建并重启恢复 Creator Job，且�
     const providerSelect = currentApp.page.getByRole('combobox', { name: '服务商' });
     await expect(providerSelect).toHaveText('OpenAI TTS');
     await expect(currentApp.page.getByRole('combobox', { name: '默认音色' }))
-      .toHaveValue('marin');
+      .toHaveAttribute('data-value', 'marin');
     await providerSelect.click();
     await currentApp.page.getByRole('option', { name: '阿里云百炼' }).click();
     await expect(currentApp.page.getByLabel('Base URL'))
       .toHaveValue('https://dashscope.aliyuncs.com/api/v1');
     await expect(currentApp.page.getByLabel('模型')).toHaveValue('qwen3-tts-flash');
-    await expect.poll(async () => (
-      currentApp.page.getByRole('combobox', { name: '默认音色' })
-        .locator('option')
-        .allTextContents()
-    )).toEqual(expect.arrayContaining([
-      expect.stringContaining('Cherry'),
-      expect.stringContaining('Kiki')
-    ]));
+    const defaultVoice = currentApp.page.getByRole('combobox', { name: '默认音色' });
+    await expect(defaultVoice).toBeEnabled();
+    await defaultVoice.click();
+    await expect(currentApp.page.getByRole('option', { name: /Cherry/ })).toBeVisible();
+    await expect(currentApp.page.getByRole('option', { name: /Kiki/ })).toBeVisible();
+    await defaultVoice.press('Escape');
 
     await currentApp.page.getByRole('button', { name: '工作台' }).click();
     await expect(currentApp.page.getByRole('heading', { name: '工作台' })).toBeVisible();
