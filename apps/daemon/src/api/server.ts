@@ -51,6 +51,7 @@ import {
 } from '../creator/krillin/runtime-verifier.js';
 import { createKrillinTtsService } from '../creator/krillin/tts-service.js';
 import { createSubtitlePreviewService } from '../creator/krillin/subtitle-preview.js';
+import { createSubtitleRenderService } from '../creator/krillin/subtitle-render.js';
 import {
   createKrillinCodexLlmGateway,
   KRILLIN_LLM_ROUTE_PREFIX
@@ -160,7 +161,8 @@ import {
   isCodexCredentialStoreConfigurationDiagnostic
 } from '../codex/credential-storage.js';
 import { resolveCodexHome } from '../codex/home.js';
-import { createFollowingLocalCodexHome, importLocalCodexConfiguration } from '../codex/probe-home.js';
+import { createFollowingLocalCodexHome, synchronizeLocalCodexConfiguration } from '../codex/probe-home.js';
+import { readLocalCodexModelConfiguration } from '../codex/local-provider.js';
 import {
   createCodexModelCatalog,
   type CodexModelCatalog
@@ -240,6 +242,7 @@ import { registerCreatorServicesRoutes } from './routes.creator-services.js';
 import { registerGatewayAccountRoutes } from './routes.gateway-account.js';
 import { createGatewayAccountService, type GatewayAccountService } from '../gateway/account-service.js';
 import { createGatewayClient, GatewayError, type GatewayClient } from '../gateway/client.js';
+import { createOfficialVoicePreview, createOfficialVoicePreviewLanguages } from '../gateway/voice-preview.js';
 import { createGatewayRuntimeBindings } from '../gateway/runtime-bindings.js';
 import { createOfficialFetch } from '../gateway/official-fetch.js';
 import { createOfficialModelAccess } from '../gateway/model-access.js';
@@ -381,7 +384,11 @@ export async function buildServer(input: BuildServerInput) {
     && resolvedCodexHome.mode === 'isolated'
     && localCodexHome !== codexHome
   ) {
-    importLocalCodexConfiguration(localCodexHome, codexHome);
+    try {
+      synchronizeLocalCodexConfiguration(localCodexHome, codexHome);
+    } catch {
+      console.warn('Local Codex configuration could not be synchronized. The assistant will check it again before use.');
+    }
   }
   try {
     await ensureCodexFileCredentialStore(codexHome);
@@ -510,7 +517,7 @@ export async function buildServer(input: BuildServerInput) {
   await purgeLegacyStickmanJobs({ db, jobsRoot: creatorJobsRoot });
   migrateStickmanVisualAssetState({ db });
   let gatewayCreatorSource: ReturnType<typeof createGatewayCreatorSource> | undefined;
-  const creatorRepository = createCreatorRepository(db, { serviceBinding: () => gatewayCreatorSource?.snapshot() ?? { source: 'manual' } });
+  const creatorRepository = createCreatorRepository(db, { serviceBinding: templateId => gatewayCreatorSource?.snapshot(templateId) ?? { source: 'manual' } });
   const creatorIssueService = createCreatorIssueService(creatorRepository, {
     onChanged(issue) {
       if (issue.scope.kind !== 'creator-job') return;
@@ -634,6 +641,8 @@ export async function buildServer(input: BuildServerInput) {
     codexBin,
     codexHome,
     cwd: dataDir,
+    readLocalConfiguration: () => readLocalCodexModelConfiguration({ codexHome: localCodexHome }),
+    readProxy: async () => (await storedCreatorServicesConfigStore.read()).proxy,
     readConfiguration: createFollowingLocalCodexHome(localCodexHome,
       join(runtimeDir, 'creator-text-codex'))
   });
@@ -718,8 +727,12 @@ export async function buildServer(input: BuildServerInput) {
       storedCreatorServicesConfigStore,
       localCodexTextModelDefaults
     );
-  gatewayCreatorSource = createGatewayCreatorSource({ account: gatewayAccount, manual: manualCreatorServicesConfigStore, getLocalOrigin: getAgentToolBaseUrl, readJobBinding: creatorRepository.getServiceBinding, readJobState: id => creatorRepository.getJob(id)?.state, readStageRun: creatorRepository.getStageRun, ledger: creatorProviderRequestLedger, directRequestsRoot: join(dataDir, 'gateway', 'requests') });
+  gatewayCreatorSource = createGatewayCreatorSource({ account: gatewayAccount, manual: manualCreatorServicesConfigStore, getLocalOrigin: getAgentToolBaseUrl, readJobBinding: creatorRepository.getServiceBinding, readJobState: id => creatorRepository.getJob(id)?.state, readJobTemplateId: id => creatorRepository.getJob(id)?.templateId, readStageRun: creatorRepository.getStageRun, ledger: creatorProviderRequestLedger, directRequestsRoot: join(dataDir, 'gateway', 'requests') });
   const creatorServicesConfigStore = gatewayCreatorSource.store;
+  // Validation must resolve the same frozen binding and task model choices as execution.
+  const readCreatorConfigForJob = (jobId: string) => gatewayCreatorSource!.runForJob(
+    jobId, `preflight:${jobId}`, () => creatorServicesConfigStore.read()
+  );
   if (stickmanContentRuntimeManager) stickmanContentRuntimeManager = createRuntimeSource(stickmanContentRuntimeManager, gatewayAccount.peekState, () => officialManagers.get('stickman'));
   let getCreatorYtDlpRuntime: ((sourceUrl?: string) => ReturnType<typeof resolveYtDlpRuntime>) | undefined;
   const youtubeConnection = new PlatformConnectionService({
@@ -770,6 +783,11 @@ export async function buildServer(input: BuildServerInput) {
     resourceRoot: creatorRuntimeRoot,
     workRoot: join(creatorJobsRoot, '.tts'),
     configStore: creatorServicesConfigStore,
+    officialPreviewLanguages: createOfficialVoicePreviewLanguages({ origin: gatewayClient.origin,
+      fetcher: createOfficialFetch({ readProxy: readCommonProxy }) }),
+    officialPreview: createOfficialVoicePreview({ origin: gatewayClient.origin,
+      getState: () => gatewayAccount.peekState(),
+      fetcher: createOfficialFetch({ readProxy: readCommonProxy }) }),
     verificationCachePath: krillinVerificationCachePath,
     ensureRuntimeReady: () => ensureKrillinRuntimeReady()
   });
@@ -1034,6 +1052,7 @@ export async function buildServer(input: BuildServerInput) {
   }
   const creatorPreflight = createCreatorPreflight({
     assertServiceSource: gatewayCreatorSource.assertJob,
+    readConfigForJob: readCreatorConfigForJob,
     validateOfficialModel: gatewayAccount.validateModel,
     readCodexImageStatus,
     videoMetadataService,
@@ -1102,6 +1121,7 @@ export async function buildServer(input: BuildServerInput) {
         workRoot: creatorJobsRoot,
         executors: creatorExecutors.map(executor => ({
           id: executor.id,
+          supportsProcessPause: executor.supportsProcessPause,
           run: stage => gatewayCreatorSource!.runForJob(stage.job.id, stage.stageRun.id, () =>
             ['download', 'krillinai', 'cover-analysis', 'wechat-article'].includes(executor.id)
               ? youtubeConnection.withCookies(() => douyinConnection.withCookies(() => executor.run(stage)))
@@ -1112,7 +1132,7 @@ export async function buildServer(input: BuildServerInput) {
           assertCreatorPresetStageRequirement({
             job,
             stageId,
-            services: await creatorServicesConfigStore.read()
+            services: await readCreatorConfigForJob(job.id)
           });
         },
         onJobChanged(job) {
@@ -1134,6 +1154,12 @@ export async function buildServer(input: BuildServerInput) {
             kind: 'stage_progress',
             payload: { stage }
           });
+          if ((stage.stageId === 'subtitle' && stage.status === 'running')
+            || (stage.progress.backgroundSourceDownload === true && ['failed', 'canceled', 'interrupted'].includes(stage.status))) {
+            void videoTranslationWorkflow?.handleStageChanged(stage).catch(error => {
+              console.warn(`Video translation source download failed to start: ${formatError(error)}`);
+            });
+          }
           if (['failed', 'canceled', 'interrupted'].includes(stage.status)) {
             void stickmanVideoWorkflow?.handleStageChanged(stage).catch(error => {
               console.warn(`Stickman video workflow reconciliation failed: ${formatError(error)}`);
@@ -1230,6 +1256,7 @@ export async function buildServer(input: BuildServerInput) {
         creator: creatorService,
         dispatcher: creatorCommandDispatcher,
         configStore: creatorServicesConfigStore,
+        readConfigForJob: readCreatorConfigForJob,
         videoMetadataService
       });
   coverWorkflow = creatorStageRunner === undefined
@@ -1237,7 +1264,8 @@ export async function buildServer(input: BuildServerInput) {
     : createCoverWorkflow({
         creator: creatorService,
         dispatcher: creatorCommandDispatcher,
-        configStore: creatorServicesConfigStore
+        configStore: creatorServicesConfigStore,
+        readConfigForJob: readCreatorConfigForJob
       });
   stickmanVideoWorkflow = creatorStageRunner === undefined
     ? undefined
@@ -1245,6 +1273,7 @@ export async function buildServer(input: BuildServerInput) {
         creator: creatorService,
         dispatcher: creatorCommandDispatcher,
         configStore: creatorServicesConfigStore,
+        readConfigForJob: readCreatorConfigForJob,
         repository: creatorRepository,
         providerLedger: creatorProviderRequestLedger
       });
@@ -1274,9 +1303,14 @@ export async function buildServer(input: BuildServerInput) {
     codexHome,
     processInjector: agentToolProcessInjector
   });
+  const readCreatorLocalConfiguration = localCodexHome === codexHome
+    ? undefined
+    : createFollowingLocalCodexHome(localCodexHome, codexHome);
   creatorAppServerRuntimeManager = createAppServerRuntimeManager({
     codexBin,
     codexHome,
+    // Keep existing rollouts while following the same local configuration as AI Services.
+    readConfiguration: readCreatorLocalConfiguration,
     processInjector: creatorAgentToolProcessInjector
   });
   officialInjectors = { general: agentToolProcessInjector, creator: creatorAgentToolProcessInjector };
@@ -1289,6 +1323,12 @@ export async function buildServer(input: BuildServerInput) {
         skillPath: creatorAgentBootstrap.skillPath,
         guideVersion: creatorAgentBootstrap.guideVersion,
         guideHash: creatorAgentBootstrap.hash,
+        async recheckConfigurationAfterFailure() {
+          if (gatewayAccount.peekState().source !== 'manual' || readCreatorLocalConfiguration === undefined) return false;
+          const checked = readCreatorLocalConfiguration({ verifyRuntime: true });
+          if (checked.repaired) await creatorAppServerRuntimeManager?.invalidate('local_codex_configuration_repaired');
+          return checked.repaired;
+        },
         available: true
       })
     : createUnavailableAgentRuntimeAdapter(creatorAgentBootstrap.error));
@@ -1492,8 +1532,10 @@ export async function buildServer(input: BuildServerInput) {
     await capture(() => codexSessionProvider.close());
     await capture(() => codexModelCatalog.close());
     await capture(() => codexControlClient.close());
-    await capture(() => creatorStageScheduler?.close());
-    await capture(() => creatorStageRunner?.close());
+    await Promise.all([
+      capture(() => creatorStageScheduler?.close()),
+      capture(() => creatorStageRunner?.close())
+    ]);
     await capture(() => agentCapabilityTokens.close());
     if (ownsDb) {
       await capture(() => {
@@ -1636,6 +1678,11 @@ export async function buildServer(input: BuildServerInput) {
       workRoot: join(creatorJobsRoot, '.previews'),
       ensureRuntimeReady: () => ensureKrillinRuntimeReady(),
       getYtDlpRuntime: () => getCreatorYtDlpRuntime?.()
+    }),
+    subtitleRenderService: createSubtitleRenderService({
+      resourceRoot: creatorRuntimeRoot,
+      workRoot: join(creatorJobsRoot, '.previews'),
+      ensureRuntimeReady: () => ensureKrillinRuntimeReady()
     })
   });
   await registerAttachmentRoutes(server, attachmentService, {

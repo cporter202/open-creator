@@ -71,6 +71,16 @@ describe('Desktop release workflow', () => {
     expect(releaseWorkflow).not.toContain('WINDOWS-UNSIGNED.txt');
   });
 
+  it('provides GitHub API authentication to both desktop packaging steps', () => {
+    const macStep = releaseWorkflow.split('name: 生成 macOS 正式签名安装包')[1]
+      .split('name: 生成 Windows 未签名安装包')[0];
+    const windowsStep = releaseWorkflow.split('name: 生成 Windows 未签名安装包')[1]
+      .split('name: 验证实际打包应用')[0];
+    for (const step of [macStep, windowsStep]) {
+      expect(step).toContain('GH_TOKEN: ${{ github.token }}');
+    }
+  });
+
   it('reuses the successful master CI instead of repeating all tests', () => {
     expect(releaseWorkflow).toContain('name: 校验同一提交的 CI 已通过');
     expect(releaseWorkflow).toContain('--workflow ci.yml');
@@ -105,7 +115,7 @@ describe('Desktop release workflow', () => {
     expect(releaseWorkflow).toContain("candidate-ready:");
     expect(releaseWorkflow).toContain("inputs.target == 'all'");
     expect(releaseWorkflow).toContain('e2e:package:smoke');
-    expect(releaseWorkflow).not.toContain("matrix.name == 'macos-arm64'");
+    expect(releaseWorkflow).toContain("matrix.name == 'macos-arm64' && 'e2e:package' || 'e2e:package:smoke'");
     expect(releaseWorkflow).toContain('opencreator-release-candidate-${{ steps.build-input.outputs.digest }}');
   });
 

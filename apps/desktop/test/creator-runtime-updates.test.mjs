@@ -108,6 +108,8 @@ describe('Creator Runtime dependency updates', () => {
     vi.stubEnv('OPENCREATOR_DESKTOP_OFFLINE', '0');
     vi.stubEnv('OPENCREATOR_DOWNLOAD_PROXY', '');
     vi.stubEnv('OPENCREATOR_YT_DLP_PATH', '');
+    vi.stubEnv('GH_TOKEN', '');
+    vi.stubEnv('GITHUB_TOKEN', '');
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     run = vi.fn((command, args) => {
       expect(command).toBe('curl');
@@ -125,17 +127,95 @@ describe('Creator Runtime dependency updates', () => {
     vi.doMock('../scripts/creator-runtime-releases.mjs', async importOriginal => ({
       ...await importOriginal(), creatorRuntimeReleases: () => ({ [`${platform}-x64`]: structuredClone(fixed) })
     }));
+    vi.doMock('../scripts/creator-nlp-runtime.mjs', () => ({ installCreatorNlpDependencies: vi.fn(() => ({ version: 'test' })) }));
   });
 
   afterEach(() => {
+    vi.doUnmock('node:fs');
     vi.doUnmock('node:child_process');
+    vi.doUnmock('../scripts/windows-file-retry.mjs');
     vi.doUnmock('../scripts/creator-runtime-releases.mjs');
+    vi.doUnmock('../scripts/creator-nlp-runtime.mjs');
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
     rmSync(root, { recursive: true, force: true });
   });
 
   const install = () => import('../scripts/install-creator-runtime-dependencies.mjs');
+
+  it('installs the verified download after a Windows rename lock is released', async () => {
+    const rename = vi.fn();
+    vi.doMock('node:fs', async importOriginal => {
+      const fs = await importOriginal();
+      rename.mockImplementationOnce(() => { throw Object.assign(new Error('locked'), { code: 'EBUSY' }); })
+        .mockImplementation(fs.renameSync);
+      return { ...fs, renameSync: rename };
+    });
+    vi.doMock('../scripts/windows-file-retry.mjs', async importOriginal => {
+      const { retryWindowsFileOperation } = await importOriginal();
+      return { retryWindowsFileOperation: operation => retryWindowsFileOperation(operation, { platform: 'win32', wait: () => {} }) };
+    });
+    await install();
+    expect(rename).toHaveBeenCalledTimes(2);
+    expect(readFileSync(join(root, 'yt-dlp'), 'utf8')).toBe(contents(newVersion));
+    expect(JSON.parse(readFileSync(join(root, 'versions.json'), 'utf8')).dependencies.ytDlp).toEqual(cache(newVersion));
+    expect(readdirSync(root).some(name => name.endsWith('.partial'))).toBe(false);
+  });
+
+  it('preserves the checksum error and previous cache when partial-file cleanup is locked', async () => {
+    downloadContents = 'corrupt download';
+    const previous = readFileSync(join(root, 'versions.json'), 'utf8');
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.doMock('node:fs', async importOriginal => {
+      const fs = await importOriginal();
+      return { ...fs, rmSync: (path, options) => {
+        if (String(path).endsWith('.partial') && fs.existsSync(path)) {
+          throw Object.assign(new Error('temporary executable remains locked'), { code: 'EBUSY' });
+        }
+        return fs.rmSync(path, options);
+      } };
+    });
+    await expect(install()).rejects.toThrow(/SHA-256 mismatch/);
+    expect(readFileSync(join(root, 'yt-dlp'), 'utf8')).toBe(contents(oldVersion));
+    expect(readFileSync(join(root, 'versions.json'), 'utf8')).toBe(previous);
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('temporary executable remains locked'));
+  });
+
+  it.each([
+    ['ghs_test_primary', 'ghs_test_fallback', 'ghs_test_primary'],
+    ['', 'ghs_test_fallback', 'ghs_test_fallback']
+  ])('authenticates GitHub API discovery without exposing credentials in curl arguments (%#)', async (ghToken, githubToken, expected) => {
+    vi.stubEnv('GH_TOKEN', ghToken);
+    vi.stubEnv('GITHUB_TOKEN', githubToken);
+    await install();
+    const [, args, options] = run.mock.calls[0];
+    expect(args.at(-1)).toBe(latestUrl);
+    expect(args).toContain('--fail-with-body');
+    expect(args).toEqual(expect.arrayContaining(['--config', '-']));
+    expect(args.join(' ')).not.toContain(expected);
+    expect(options.input).toBe(`header = "Authorization: Bearer ${expected}"\n`);
+    expect(options.stdio[0]).toBe('pipe');
+    for (const [, downloadArgs, downloadOptions] of run.mock.calls.slice(1)) {
+      expect(downloadArgs.join(' ')).not.toContain(expected);
+      expect(downloadOptions.input).toBeUndefined();
+    }
+  });
+
+  it('does not send the API token to a release checksum download', async () => {
+    vi.stubEnv('GH_TOKEN', 'ghs_test_api_only');
+    const release = metadata();
+    delete release.assets[0].digest;
+    run.mockImplementationOnce(() => JSON.stringify(release))
+      .mockImplementationOnce((command, args, options) => {
+        expect(command).toBe('curl');
+        expect(args.at(-1)).toBe(`${repository}/releases/download/${newVersion}/SHA2-256SUMS`);
+        expect(args.join(' ')).not.toContain('ghs_test_api_only');
+        expect(options.input).toBeUndefined();
+        return `${asset().sha256}  yt-dlp\n`;
+      });
+    await install();
+    expect(readFileSync(join(root, 'yt-dlp'), 'utf8')).toBe(contents(newVersion));
+  });
 
   it('updates a populated cache and records the verified release for each invocation', async () => {
     for (const version of [newVersion, '2026.10.11.233141']) {

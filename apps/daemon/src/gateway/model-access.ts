@@ -1,8 +1,9 @@
+import { gatewayModelIdMatches } from '@opencreator/protocol';
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
-import { z } from 'zod';
-import { gatewayModelOperations, gatewayModelCompatible, gatewayModelReady, type GatewayModel, type GatewayModelAvailability, type GatewayModelOperation, type PublicErrorFacts } from '@opencreator/protocol';
+import { z } from 'zod/v3';
+import { gatewayModelOperations, gatewayModelCompatible, gatewayModelReady, isRetiredOpenAiImageModel, type GatewayModel, type GatewayModelAvailability, type GatewayModelOperation, type PublicErrorFacts } from '@opencreator/protocol';
 import { readPrivateJsonFile, writePrivateJsonFile } from '../config/private-json-file.js';
 import { catalogSchema, type GatewayBootstrap } from './client.js';
 import { imageModelsSchema, officialCatalogModels, openRouterModelSchema, videoModelsSchema } from './openrouter-model-catalog.js';
@@ -43,14 +44,16 @@ export function modelAccessGroup(model: GatewayModel): string | undefined {
 
 export function officialModelPolicy(models: GatewayModel[]) {
   // Account catalog availability does not override OpenCreator's adapter compatibility.
-  return models.filter(model => model.vendor?.toLowerCase() !== 'anthropic' && !/^claude-/i.test(model.id) && modelAccessGroup(model) !== 'anthropic'
+  return models.filter(model => !(model.modality === 'image' && isRetiredOpenAiImageModel(model.id))
+    && (model.catalogSchema === 2 || (model.vendor?.toLowerCase() !== 'anthropic' && !/^claude-/i.test(model.id) && modelAccessGroup(model) !== 'anthropic'
     && !model.id.endsWith(':batch')
-    && !(model.modality === 'text' && modelAccessGroup(model) === 'openrouter'));
+    && !(model.modality === 'text' && modelAccessGroup(model) === 'openrouter'))));
 }
 
 export function withModelCatalog(bootstrap: GatewayBootstrap, models: GatewayModel[]): GatewayBootstrap {
   if (bootstrap.transport === 'gateway') {
-    const defaults = Object.fromEntries(Object.entries(bootstrap.defaults).filter(([key]) => !['textProcessing', 'subtitle'].includes(key)));
+    const defaults = bootstrap.models.some(model => model.catalogSchema === 2) ? { ...bootstrap.defaults }
+      : Object.fromEntries(Object.entries(bootstrap.defaults).filter(([key]) => !['textProcessing', 'subtitle'].includes(key)));
     return { ...bootstrap, models: officialModelPolicy(models).filter(gatewayModelCompatible), defaults };
   }
   const defaults: Record<string, string> = {};
@@ -248,7 +251,7 @@ export function createOfficialModelAccess(input: {
     });
   }
   function findModel(bootstrap: GatewayBootstrap, id: string, modality: GatewayModel['modality']) {
-    return compatibleModels(bootstrap).find(model => model.id === id && model.modality === modality);
+    return compatibleModels(bootstrap).find(model => gatewayModelIdMatches(model.id, id) && model.modality === modality);
   }
   function filter(bootstrap: GatewayBootstrap) {
     return withModelCatalog(bootstrap, compatibleModels(bootstrap).filter(model => {

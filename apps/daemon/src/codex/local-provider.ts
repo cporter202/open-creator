@@ -1,4 +1,5 @@
 import { parse } from '@iarna/toml';
+import { migrateOpenAiImageModel } from '@opencreator/protocol';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -15,7 +16,7 @@ export type LocalCodexImageConfiguration =
   | { authentication: 'chatgpt' };
 
 export type LocalCodexModelConfiguration =
-  | { authentication: 'api_key'; provider: LocalCodexProvider }
+  | { authentication: 'api_key'; provider: LocalCodexProvider; wireApi?: 'responses' }
   | { authentication: 'chatgpt'; model: string };
 
 export async function readLocalCodexModelConfiguration(input: {
@@ -25,9 +26,12 @@ export async function readLocalCodexModelConfiguration(input: {
   const image = await readLocalCodexImageConfiguration(input);
   const config = await readToml(join(input.codexHome, 'config.toml'), true);
   const model = readString(config.model) || 'codex';
+  const providers = readRecord(config.model_providers);
+  const provider = readRecord(providers?.[readString(config.model_provider)]);
   return image.authentication === 'chatgpt'
     ? { authentication: 'chatgpt', model }
-    : { authentication: 'api_key', provider: { ...image.provider, model } };
+    : { authentication: 'api_key', provider: { ...image.provider, model },
+        ...(provider?.wire_api === 'responses' ? { wireApi: 'responses' as const } : {}) };
 }
 
 export class LocalCodexProviderError extends Error {
@@ -116,7 +120,7 @@ async function readJson(path: string, strict = false): Promise<Record<string, un
 }
 
 function imageModel(textModel: string): string {
-  return /^gpt-image-/i.test(textModel) ? textModel : 'gpt-image-1';
+  return /^gpt-image-/i.test(textModel) ? migrateOpenAiImageModel(textModel) : 'gpt-image-2';
 }
 
 function readRecord(value: unknown): Record<string, TomlValue> | undefined {

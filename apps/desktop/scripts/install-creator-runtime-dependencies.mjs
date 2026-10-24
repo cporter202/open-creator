@@ -20,6 +20,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { creatorRuntimeReleases, resolveYtDlpRelease } from './creator-runtime-releases.mjs';
 import { verifyRuntimeExecutable } from './runtime-executable-check.mjs';
+import { installCreatorNlpDependencies } from './creator-nlp-runtime.mjs';
+import { retryWindowsFileOperation } from './windows-file-retry.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(scriptDir, '../../..');
@@ -69,11 +71,13 @@ verifyPortableYtDlpRuntime({
   certificateBundle: join(outputRoot, release.certificateBundle.fileName),
   expectedVersion: release.ytDlp.version
 });
+const nlp = installCreatorNlpDependencies({ vendorRoot: outputRoot, platform, arch, offline, proxy });
 writeFileSync(join(outputRoot, 'versions.json'), `${JSON.stringify({
   version: 1,
   platform,
   arch,
-  dependencies: installed
+  dependencies: installed,
+  nlp
 }, null, 2)}\n`);
 console.log(JSON.stringify({ ok: true, outputRoot, dependencies: installed }));
 
@@ -88,16 +92,27 @@ function readCachedYtDlpRelease() {
 
 function readReleaseText(url) {
   const args = [
-    '--fail', '--silent', '--show-error', '--location',
+    '--fail-with-body', '--silent', '--show-error', '--location',
     '--retry', '3', '--connect-timeout', '20', '--max-time', '60',
     '--header', 'Cache-Control: no-cache'
   ];
+  let input;
+  if (new URL(url).origin === 'https://api.github.com') {
+    const token = process.env.GH_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim();
+    if (token) {
+      if (/[\r\n]/.test(token)) throw new Error('Invalid GitHub API token');
+      // Keep credentials out of process arguments and command failure messages.
+      args.push('--config', '-');
+      input = `header = ${JSON.stringify(`Authorization: Bearer ${token}`)}\n`;
+    }
+  }
   if (proxy) args.push('--proxy', proxy);
   args.push(url);
   return execFileSync('curl', args, {
     cwd: rootDir,
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'inherit'],
+    input,
+    stdio: ['pipe', 'pipe', 'inherit'],
     maxBuffer: 4 * 1024 * 1024
   });
 }
@@ -116,16 +131,25 @@ function installAsset(name, asset, path) {
   }
 
   const temporary = `${path}.${process.pid}.partial`;
-  rmSync(temporary, { force: true });
+  retryWindowsFileOperation(() => rmSync(temporary, { force: true }));
   console.log(`[creator-runtime] Downloading ${name} ${asset.version}`);
+  let installationError;
   try {
     downloadAsset(name, asset, temporary);
     if (asset.executable) chmodExecutable(temporary);
     if (asset.verify) verifyExecutable(name, asset, temporary);
-    rmSync(path, { recursive: true, force: true });
-    renameSync(temporary, path);
+    retryWindowsFileOperation(() => rmSync(path, { recursive: true, force: true }));
+    retryWindowsFileOperation(() => renameSync(temporary, path));
+  } catch (error) {
+    installationError = error;
+    throw error;
   } finally {
-    rmSync(temporary, { force: true });
+    try {
+      retryWindowsFileOperation(() => rmSync(temporary, { force: true }));
+    } catch (error) {
+      if (!installationError) throw error;
+      console.warn(`[creator-runtime] Unable to remove temporary download ${temporary}: ${error.message}`);
+    }
   }
 }
 

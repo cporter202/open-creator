@@ -29,8 +29,17 @@ describe('local Codex provider', () => {
     root = await codexHome(['openai_base_url = "https://api.example.test/v1"']);
     await writeFile(join(root, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'api-secret' }));
     await expect(readLocalCodexImageConfiguration({ codexHome: root })).resolves.toMatchObject({
-      authentication: 'api_key', provider: { apiKey: 'api-secret', model: 'gpt-image-1' }
+      authentication: 'api_key', provider: { apiKey: 'api-secret', model: 'gpt-image-2' }
     });
+  });
+
+  it('exposes the selected text protocol without changing the image provider', async () => {
+    root = await codexHome(['model = "local-text-model"', 'model_provider = "local"', '[model_providers.local]',
+      'base_url = "https://local.example/v1"', 'wire_api = "responses"', 'experimental_bearer_token = "local-key"']);
+    expect(await readLocalCodexModelConfiguration({ codexHome: root, env: {} })).toEqual({ authentication: 'api_key', wireApi: 'responses',
+      provider: { baseUrl: 'https://local.example/v1', apiKey: 'local-key', model: 'local-text-model' } });
+    expect(await readLocalCodexProvider({ codexHome: root, env: {} })).toEqual({
+      baseUrl: 'https://local.example/v1', apiKey: 'local-key', model: 'gpt-image-2' });
   });
 
   it('honors an explicitly selected API mode even if an old OAuth token remains', async () => {
@@ -72,8 +81,16 @@ describe('local Codex provider', () => {
     await expect(readLocalCodexProvider({ codexHome: root })).resolves.toEqual({
       baseUrl: 'https://forward.example.test/v1',
       apiKey: 'gateway-secret',
-      model: 'gpt-image-1'
+      model: 'gpt-image-2'
     });
+  });
+
+  it('migrates a retired image model without modifying the local Codex configuration', async () => {
+    root = await codexHome(['model = "gpt-image-1"']);
+    await expect(readLocalCodexProvider({ codexHome: root, env: { OPENAI_API_KEY: 'local-key' } }))
+      .resolves.toMatchObject({ model: 'gpt-image-2', apiKey: 'local-key' });
+    await expect(readLocalCodexModelConfiguration({ codexHome: root, env: { OPENAI_API_KEY: 'local-key' } }))
+      .resolves.toMatchObject({ provider: { model: 'gpt-image-1' } });
   });
 
   it('supports provider environment keys and configured image models', async () => {
@@ -109,7 +126,7 @@ describe('local Codex provider', () => {
     await expect(readLocalCodexProvider({ codexHome: root })).resolves.toEqual({
       baseUrl: 'https://api.example.test/v1',
       apiKey: 'stored-secret',
-      model: 'gpt-image-1'
+      model: 'gpt-image-2'
     });
   });
 

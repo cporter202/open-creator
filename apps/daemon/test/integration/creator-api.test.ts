@@ -290,6 +290,7 @@ describe('creator api', () => {
         sourceType: 'url',
         sourceUrl: 'https://www.youtube.com/watch?v=job-control',
         targetLanguage: 'zh_cn',
+        skipVideoDownload: true,
         composeVideo: true,
         videoFormat: 'horizontal'
       }
@@ -817,6 +818,33 @@ describe('creator api', () => {
     expect((await request('GET', `/creator/jobs/${job.id}`)).json().job.stages).toEqual([]);
   });
 
+  it('returns the authoritative Agent issue with its provider reason instead of a second HTTP error', async () => {
+    await setupServer({ agentRuntime: {
+      id: 'provider-failure', available: true,
+      async runTurn() {
+        throw Object.assign(new Error('The selected model is not supported by this account.'), {
+          publicFacts: { kind: 'http-rejected', provider: 'codex',
+            upstreamMessage: 'The selected model is not supported by this account.' }
+        });
+      }
+    } });
+    const created = await request('POST', '/creator/jobs', {
+      projectId: 'project_agent_failure', templateId: 'video-download'
+    });
+    const job = created.json().job;
+    const response = await request('POST', `/creator/jobs/${job.id}/agent-turns`, { message: 'hello' });
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toMatchObject({ error: {
+      code: 'creator_agent_failed',
+      issue: { code: 'creator_agent_failed', publicFacts: {
+        provider: 'codex', upstreamMessage: 'The selected model is not supported by this account.'
+      } }
+    } });
+    const current = (await request('GET', `/creator/jobs/${job.id}`)).json().job;
+    expect(current.issues).toHaveLength(1);
+    expect(current.issues[0].id).toBe(response.json().error.issue.id);
+  });
+
   it('returns the persisted Agent timeline and resolves approvals by generation', async () => {
     let observedDecision = '';
     const agentRuntime: AgentRuntimeAdapter = {
@@ -1107,13 +1135,15 @@ async function waitForCreatorJob(
   jobId: string,
   predicate: (job: any) => boolean
 ): Promise<any> {
+  let lastJob: any;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const response = await request('GET', `/creator/jobs/${jobId}`);
     const job = response.json().job;
+    lastJob = job;
     if (predicate(job)) return job;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  throw new Error(`Timed out waiting for Creator job ${jobId}`);
+  throw new Error(`Timed out waiting for Creator job ${jobId}: ${JSON.stringify({ status: lastJob?.status, stages: lastJob?.stages })}`);
 }
 
 async function waitForApiApproval(jobId: string) {

@@ -308,6 +308,9 @@ type echoBatchCompleter struct {
 }
 
 func (c *echoBatchCompleter) ChatCompletion(prompt string) (string, error) {
+	if response, ok := neutralSemanticTestResponse(prompt); ok {
+		return response, nil
+	}
 	input, err := decodePairedTestInput(prompt)
 	if err != nil {
 		return "", err
@@ -353,11 +356,11 @@ func TestSplitTextAndTranslateUsesBatchesAndReportsProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	sort.Ints(completer.batchSizes)
-	if fmt.Sprint(completer.batchSizes) != "[1 12]" {
-		t.Fatalf("batch sizes = %v, want [1 12]", completer.batchSizes)
+	if fmt.Sprint(completer.batchSizes) != "[3 10]" {
+		t.Fatalf("batch sizes = %v, want [3 10]", completer.batchSizes)
 	}
 	if len(progress) != 2 || progress[0] <= 0 || progress[0] >= 13 || progress[1] != 13 {
-		t.Fatalf("progress = %v, want [12 13]", progress)
+		t.Fatalf("progress = %v, want two advancing updates ending at 13", progress)
 	}
 	if len(results) != 13 || results[12].TranslatedText == results[12].OriginText {
 		t.Fatalf("unexpected results: %+v", results)
@@ -369,7 +372,10 @@ type scriptedCompleter struct {
 	calls     int
 }
 
-func (c *scriptedCompleter) ChatCompletion(string) (string, error) {
+func (c *scriptedCompleter) ChatCompletion(prompt string) (string, error) {
+	if response, ok := neutralSemanticTestResponse(prompt); ok {
+		return response, nil
+	}
 	if c.calls >= len(c.responses) {
 		return "", errors.New("unexpected call")
 	}
