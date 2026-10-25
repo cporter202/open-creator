@@ -141,7 +141,7 @@ describe('VideoTranslationResultWorkspace', () => {
     render(<EditingHarness />);
     fireEvent.click(screen.getByRole('button', { name: '查找与替换' }));
     const find = screen.getByRole('search');
-    fireEvent.change(within(find).getByRole('combobox', { name: '搜索范围' }), { target: { value: 'sourceText' } });
+    selectOption(within(find).getByRole('combobox', { name: '搜索范围' }), 'sourceText');
     fireEvent.change(within(find).getByRole('textbox', { name: '查找' }), { target: { value: '世界' } });
     fireEvent.click(within(find).getByRole('button', { name: '替换' }));
     expect(screen.getByDisplayValue('你好')).toBeInTheDocument();

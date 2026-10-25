@@ -782,7 +782,7 @@ export async function registerCreatorRoutes(
         stage.status === 'queued' || stage.status === 'running'
       ));
       if (activeStages.length === 0) {
-        const latest = job.stages.at(-1);
+        const latest = jobControlStage(job);
         if (latest?.status === 'canceled') {
           return {
             job,
@@ -796,15 +796,15 @@ export async function registerCreatorRoutes(
         );
       }
       const stages = options.stageRunner.cancelJob(id);
-      const stage = stages.at(-1);
+      const latestJob = requireCreatorJob(service, id);
+      const stage = jobControlStage(latestJob);
       if (stage === undefined) {
         throw new CreatorServiceError(
           'creator_job_not_running',
           'Creator job has no active stage'
         );
       }
-      const latestJob = requireCreatorJob(service, id);
-      const canceling = stage.status === 'queued' || stage.status === 'running';
+      const canceling = stages.some(candidate => candidate.status === 'queued' || candidate.status === 'running');
       return reply.code(canceling ? 202 : 200).send({
         job: latestJob,
         stage,
@@ -826,7 +826,7 @@ export async function registerCreatorRoutes(
         );
       }
       let job = requireCreatorJob(service, id);
-      const latest = job.stages.at(-1);
+      const latest = jobControlStage(job);
       if (job.templateId === 'video-download' && latest) {
         const live = options.stageRunner.resumeDownload(latest.id);
         if (live) return { job: requireCreatorJob(service, id), stage: live, control: 'resumed' };
@@ -882,19 +882,29 @@ export async function registerCreatorRoutes(
         }
         job = requireCreatorJob(service, id);
       }
-      const target = job.stages.at(-1);
+      job = requireCreatorJob(service, id);
+      const target = jobControlStage(job);
+      if (target?.progress.resumedFromStageRunId === latest.id && isAlreadyResumed(job, target)) {
+        return { job, stage: target, control: 'resumed' };
+      }
       if (target?.id !== latest.id || (target.status !== 'canceled' && target.status !== 'interrupted')) {
         throw new CreatorServiceError(
           'creator_job_not_resumable',
           'Creator job state changed before it could be resumed'
         );
       }
+      // Only a stored workflow download may be resumed through system dispatch.
+      const backgroundSourceDownload = job.templateId === 'video-translation'
+        && target.progress.backgroundSourceDownload === true;
       const result = options.dispatcher.dispatch(id, {
         action: 'run-stage',
         expectedRevision: job.revision,
         idempotencyKey: `resume:${target.id}`,
         input: {
           stageId: target.stageId,
+          ...(backgroundSourceDownload
+            ? { backgroundSourceDownload: true }
+            : {}),
           ...(typeof target.progress.baseResultVersion === 'number'
             ? { baseResultVersion: target.progress.baseResultVersion }
             : {}),
@@ -912,7 +922,7 @@ export async function registerCreatorRoutes(
             : {}),
           resumedFromStageRunId: target.id
         }
-      }, 'user', {
+      }, backgroundSourceDownload ? 'system' : 'user', {
         scopeKey: target.scopeKey,
         inputFingerprint: target.inputFingerprint,
         resumedFromStageRunId: target.id,
@@ -1683,6 +1693,16 @@ function latestStageMatching(
   predicate: (stage: CreatorStageRun) => boolean
 ): CreatorStageRun | undefined {
   return [...job.stages].reverse().find(predicate);
+}
+
+function jobControlStage(job: CreatorJob): CreatorStageRun | undefined {
+  if (job.templateId !== 'video-translation') return job.stages.at(-1);
+  const foreground = latestStageMatching(job, stage => stage.progress.backgroundSourceDownload !== true);
+  if (foreground === undefined || foreground.status !== 'succeeded') return foreground ?? job.stages.at(-1);
+  // A completed subtitle stage may still be waiting for its parallel media download.
+  // Never let that download hide a stopped foreground stage or an ensuing render.
+  return latestStageMatching(job, stage => stage.progress.backgroundSourceDownload === true
+    && stage.progress.workflowParentStageRunId === foreground.id) ?? foreground;
 }
 
 function isAlreadyResumed(job: CreatorJob, latest: CreatorStageRun): boolean {

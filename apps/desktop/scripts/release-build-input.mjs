@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { verifyDesktopReleaseTag } from './verify-desktop-release-tag.mjs';
@@ -27,7 +27,7 @@ export function isReleaseOnlyPath(path) {
 
 export function digestBuildEntries(entries) {
   const included = entries
-    .filter(entry => !isReleaseOnlyPath(entry.path))
+    .filter(entry => !isReleaseOnlyPath(entry.path) && !entry.path.startsWith('apps/desktop/e2e/'))
     .sort((left, right) => left.path.localeCompare(right.path));
   const hash = createHash('sha256');
   for (const entry of included) {
@@ -93,6 +93,54 @@ export function changesAreReleaseOnly(paths) {
   return paths !== null && paths.length > 0 && paths.every(isReleaseOnlyPath);
 }
 
+function planCandidate() {
+  const matrix = JSON.parse(process.env.RELEASE_MATRIX);
+  const reused = [];
+  let reuseLinux = false;
+  const runId = process.env.REUSE_RUN_ID;
+  if (runId) {
+    if (process.env.TARGET !== 'all' || !/^[1-9]\d*$/.test(runId)) {
+      throw new Error('reuse_run_id requires target=all and a numeric workflow run ID');
+    }
+    const repository = process.env.GH_REPO;
+    const api = path => JSON.parse(execFileSync('gh', ['api', `repos/${repository}/${path}`], {
+      encoding: 'utf8', maxBuffer: 4 * 1024 * 1024
+    }));
+    const run = api(`actions/runs/${runId}`);
+    if (run.status !== 'completed' || run.event !== 'workflow_dispatch'
+      || run.head_branch !== 'master' || run.path !== '.github/workflows/desktop-release.yml'
+      || run.repository.full_name.toLowerCase() !== repository.toLowerCase()) {
+      throw new Error('Reusable packages must come from a completed master release workflow');
+    }
+    execFileSync('git', ['merge-base', '--is-ancestor', run.head_sha, 'HEAD'], { stdio: 'pipe' });
+    if (buildInputDigest(run.head_sha) !== buildInputDigest()) {
+      throw new Error('Reusable packages have different application build inputs');
+    }
+    const { jobs } = api(`actions/runs/${runId}/jobs?per_page=100`);
+    const { artifacts } = api(`actions/runs/${runId}/artifacts?per_page=100`);
+    const available = new Set(artifacts.filter(artifact => !artifact.expired).map(artifact => artifact.name));
+    matrix.include = matrix.include.filter(target => {
+      const names = [target.artifact, `krillinai-release-${target.name}`];
+      const succeeded = jobs.some(job => job.name.startsWith(`package (${target.name},`)
+        && job.conclusion === 'success');
+      if (!succeeded || !names.every(name => available.has(name))) return true;
+      reused.push(...names);
+      return false;
+    });
+    reuseLinux = available.has('krillinai-release-linux')
+      && jobs.some(job => job.name === 'krillinai-linux-package' && job.conclusion === 'success');
+    if (reuseLinux) reused.push('krillinai-release-linux');
+    console.log(`Reusing ${reused.length} artifacts from ${runId} (${run.head_sha}); building ${matrix.include.map(target => target.name).join(', ') || 'no Desktop targets'}`);
+  }
+  appendFileSync(process.env.GITHUB_OUTPUT, [
+    `matrix=${JSON.stringify(matrix)}`,
+    `build-required=${matrix.include.length > 0}`,
+    `reused-artifacts=${JSON.stringify(reused)}`,
+    `reuse-linux=${reuseLinux}`,
+    ''
+  ].join('\n'));
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
   try {
     const [command = 'digest', ...args] = process.argv.slice(2);
@@ -103,6 +151,8 @@ if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
       console.log(changesAreReleaseOnly(changedPaths(args[0], args[1])) ? 'true' : 'false');
     } else if (command === 'promotion-target') {
       console.log(JSON.stringify(resolvePromotionTarget(args[0])));
+    } else if (command === 'plan-candidate') {
+      planCandidate();
     } else {
       throw new Error(`Unknown command: ${command}`);
     }

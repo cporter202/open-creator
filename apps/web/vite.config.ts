@@ -24,6 +24,7 @@ import {
   parseDevDaemonStartupError,
   type DevDaemonConfig
 } from './src/runtime/dev-proxy-target.js';
+import { resolveDevCreatorRuntimeRoot } from './src/runtime/dev-creator-runtime.js';
 
 type RuntimeConfig = DevDaemonConfig;
 
@@ -297,7 +298,7 @@ function getRuntimeConfig(): Promise<RuntimeConfig> {
 }
 
 function startRuntimeProcess(): RuntimeProcess {
-  const creatorRuntimeRoot = resolveDevCreatorRuntimeRoot();
+  const creatorRuntimeRoot = resolveDevCreatorRuntimeRoot(resolve(webDir, '../..'));
   const codexBin = resolveDevCodexBin();
   const ytDlpPath = resolveDevYtDlpPath();
   const daemonDir = resolve(webDir, '../daemon');
@@ -392,22 +393,6 @@ function resolveDevCodexBin(): string | undefined {
     `../desktop/.pack/codex-runtime/bin/codex${executableSuffix}`
   );
   return existsSync(candidate) ? candidate : undefined;
-}
-
-function resolveDevCreatorRuntimeRoot(): string | undefined {
-  const configured = process.env.OPENCREATOR_CREATOR_RUNTIME_ROOT?.trim();
-  if (configured) return resolve(configured);
-
-  const candidate = resolve(
-    webDir,
-    '../desktop/.pack/creator-runtime/krillinai'
-  );
-  const executableSuffix = process.platform === 'win32' ? '.exe' : '';
-  const requiredAssets = [
-    join(candidate, 'manifest.json'),
-    join(candidate, 'bin', `krillinai-cli${executableSuffix}`)
-  ];
-  return requiredAssets.every(path => existsSync(path)) ? candidate : undefined;
 }
 
 function resolveDevYtDlpPath(): string | undefined {

@@ -7,6 +7,21 @@ import { LanguageProvider } from '../../i18n/LanguageProvider.js';
 import { RuntimeComponentsSettingsView } from './RuntimeComponentsSettingsView.js';
 
 describe('RuntimeComponentsSettingsView', () => {
+  it('keeps yt-dlp visible with a retry action when its status cannot be loaded', async () => {
+    const checkYtDlpUpdate = vi.fn(async () => status());
+    renderView({
+      ytDlpStatus: undefined,
+      checkYtDlpUpdate,
+      issues: [normalizePageIssue('settings-runtime-components', 'runtime.load-yt-dlp',
+        new Error('Runtime unavailable'), '无法读取视频下载组件状态。')]
+    });
+
+    expect(screen.getByRole('heading', { name: 'yt-dlp nightly' })).toBeVisible();
+    expect(screen.getByText('状态读取失败')).toHaveAttribute('data-status', 'failed');
+    fireEvent.click(screen.getByRole('button', { name: '重新检查' }));
+    await waitFor(() => expect(checkYtDlpUpdate).toHaveBeenCalledWith(true));
+  });
+
   it('shows current, latest, and updated versions, and installs an available update', async () => {
     const updateYtDlp = vi.fn(async () => status({
       source: 'managed',

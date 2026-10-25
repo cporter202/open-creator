@@ -101,16 +101,10 @@ func TestSubtitleRecoveryIntegration(t *testing.T) {
 						}
 					}
 					blocks, err := readSRTBlocks(filepath.Join(workdir, types.SubtitleTaskTargetLanguageSrtFileName))
-					var exported strings.Builder
-					for i, block := range blocks {
-						exported.WriteString(strings.Join(block.Lines, ""))
-						if i > 0 && strings.Split(blocks[i-1].Timestamp, " --> ")[1] != strings.Split(block.Timestamp, " --> ")[0] {
-							t.Fatalf("分段时间不连续: %+v", blocks)
-						}
+					if err != nil {
+						t.Fatal(err)
 					}
-					if err != nil || len(blocks) == 0 || exported.String() != target || !strings.HasPrefix(blocks[0].Timestamp, "00:00:01,000 --> ") || !strings.HasSuffix(blocks[len(blocks)-1].Timestamp, " --> 00:00:03,000") {
-						t.Fatalf("最终导出内容或时间丢失: %+v err=%v", blocks, err)
-					}
+					assertPreservedSubtitleExport(t, blocks, target, "00:00:01,000", "00:00:03,000")
 				}
 				run()
 				if calls.Load() != 1 {
@@ -220,16 +214,16 @@ func TestSubtitleFinalLengthRecoveryIntegration(t *testing.T) {
 				t.Fatalf("修正预算耗尽后应保留原译继续导出: %v", err)
 			}
 			fallback, err := readSRTBlocks(filepath.Join(workdir, types.SubtitleTaskTargetLanguageSrtFileName))
-			var exported strings.Builder
-			for _, block := range fallback {
-				exported.WriteString(strings.Join(block.Lines, ""))
+			if err != nil {
+				t.Fatal(err)
 			}
+			assertPreservedSubtitleExport(t, fallback, target, "00:00:01,000", "00:00:09,000")
 			expectedBlocks, expectedSplits, resumedSplits := 1, int32(3), int32(4)
 			if route == "vtt" {
 				// 冻结排版预算耗尽后，程序分段已经完成；续跑不再支付模型请求。
 				expectedBlocks, expectedSplits, resumedSplits = 2, 2, 2
 			}
-			if err != nil || len(fallback) != expectedBlocks || exported.String() != target || splits.Load() != expectedSplits {
+			if err != nil || len(fallback) != expectedBlocks || splits.Load() != expectedSplits {
 				t.Fatalf("未按预算完整导出原译: output=%+v splits=%d err=%v", fallback, splits.Load(), err)
 			}
 			ready.Store(true)
@@ -256,5 +250,26 @@ func TestSubtitleFinalLengthRecoveryIntegration(t *testing.T) {
 				t.Fatal("新增切口丢失原译或改变父句起止时间")
 			}
 		})
+	}
+}
+
+// Segmentation may change, but content, contiguous timing and cue order must survive.
+func assertPreservedSubtitleExport(t *testing.T, blocks []srtBlock, text, start, end string) {
+	t.Helper()
+	if len(blocks) == 0 {
+		t.Fatal("empty subtitle export")
+	}
+	var content strings.Builder
+	previousEnd := start
+	for i, block := range blocks {
+		bounds := strings.Split(block.Timestamp, " --> ")
+		if len(bounds) != 2 || bounds[0] != previousEnd || bounds[1] <= bounds[0] || block.Index != fmt.Sprint(i+1) || len(block.Lines) != 1 || block.Lines[0] == "" {
+			t.Fatalf("lost cue content, order or timing: %+v", block)
+		}
+		previousEnd = bounds[1]
+		content.WriteString(block.Lines[0])
+	}
+	if previousEnd != end || strings.Join(strings.Fields(content.String()), "") != strings.Join(strings.Fields(text), "") {
+		t.Fatalf("subtitle content or outer timing changed: %+v, want %q (%s --> %s)", blocks, text, start, end)
 	}
 }

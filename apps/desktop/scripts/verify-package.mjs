@@ -28,9 +28,9 @@ import { createHash } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { treeSize } from './package-directory-size.mjs';
-import { verifyCreatorRuntime } from './creator-runtime-contract.mjs';
+import { verifyCreatorRuntimeBuild } from './creator-runtime-build.mjs';
 import { verifyCreatorNlpRuntime } from './creator-nlp-runtime.mjs';
 import { verifyCodexRuntime } from './codex-runtime-contract.mjs';
 import {
@@ -116,7 +116,7 @@ await assertBrandingContents();
 assertDaemonContents();
 assertCreatorPresetContents();
 assertWebContents();
-assertCreatorRuntime();
+await assertCreatorRuntime();
 assertCreatorSubtitleFontContents();
 assertCodexRuntime();
 assertStickmanRuntime();
@@ -604,17 +604,26 @@ function normalizedAsarEntries() {
   });
 }
 
-function assertCreatorRuntime() {
-  const runtime = verifyCreatorRuntime(creatorRuntimeDir, targetPlatform, targetArch);
+async function assertCreatorRuntime() {
+  const runtime = verifyCreatorRuntimeBuild(creatorRuntimeDir, targetPlatform, targetArch, {
+    allowSigned: manifest.macSigningMode === 'developer-id'
+  });
   if (runtime.nlp === undefined) throw new Error('Packaged Creator Runtime is missing spaCy');
   if (targetPlatform === process.platform && targetArch === process.arch) {
     verifyCreatorNlpRuntime(resolve(creatorRuntimeDir, runtime.nlp.executable), runtime.nlp);
+    // Validate with the actual consumer as well as the packaging contract.
+    const { readKrillinRuntimeManifest } = await import(pathToFileURL(
+      join(daemonDir, 'dist', 'creator', 'krillin', 'manifest.js')
+    ).href);
+    readKrillinRuntimeManifest(creatorRuntimeDir);
   }
   if (typeof manifest.packageRoot !== 'string') return;
   if (
     manifest.krillinCliVersion !== runtime.cliVersion
     || manifest.krillinSourceCommit !== runtime.sourceCommit
     || manifest.krillinSourceSha256 !== runtime.sourceSha256
+    || manifest.krillinBuild?.buildRecipeSha256 !== runtime.krillinBuild.buildRecipeSha256
+    || manifest.krillinBuild?.cliSha256 !== runtime.krillinBuild.cliSha256
     || manifest.krillinIntegrationPatchSha256 !== runtime.integrationPatchSha256
     || manifest.ytDlpRuntimeMode !== runtime.ytDlp?.mode
     || manifest.ytDlpVersion !== runtime.ytDlp?.version

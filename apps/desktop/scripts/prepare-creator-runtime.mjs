@@ -21,6 +21,8 @@ import * as fontkit from 'fontkit';
 import { verifyRuntimeExecutable } from './runtime-executable-check.mjs';
 import { stripMacNodeRuntime } from './prepare-creator-node.mjs';
 import { creatorNlpLockPath, prepareCreatorNlpRuntime } from './creator-nlp-runtime.mjs';
+import { krillinBuildIdentity, verifyKrillinBuild } from '../../../scripts/krillinai-build-contract.mjs';
+import { verifyCreatorRuntimeBuild } from './creator-runtime-build.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = resolve(scriptDir, '..');
@@ -55,6 +57,10 @@ const vendorVersions = readVendorVersions();
 const cliVersion = krillinBuild.componentVersion;
 const sourceCommit = krillinBuild.sourceCommit;
 const sourceSha256 = krillinBuild.sourceSha256;
+const krillinBuildRecord = {
+  buildRecipeSha256: krillinBuild.buildRecipeSha256,
+  cliSha256: krillinBuild.binaries['krillinai-cli'].sha256
+};
 rmSync(outputRoot, { recursive: true, force: true });
 mkdirSync(binDir, { recursive: true });
 const subtitleFonts = prepareSubtitleFonts();
@@ -110,6 +116,7 @@ const buildRecord = {
   cliVersion,
   sourceCommit,
   sourceSha256,
+  krillinBuild: krillinBuildRecord,
   ytDlp: ytDlpRuntime.descriptor,
   nlp: nlpRuntime.descriptor,
   subtitleFonts: {
@@ -119,6 +126,8 @@ const buildRecord = {
   integrationPatchSha256: hashFiles([
     join(rootDir, 'scripts', 'build-krillinai.mjs'),
     join(rootDir, 'scripts', 'download-go-modules.mjs'),
+    join(rootDir, 'scripts', 'krillinai-build-contract.mjs'),
+    join(scriptDir, 'creator-runtime-build.mjs'),
     join(scriptDir, 'install-creator-runtime-dependencies.mjs'),
     join(scriptDir, 'creator-runtime-releases.mjs'),
     join(scriptDir, 'prepare-creator-runtime.mjs'),
@@ -155,6 +164,7 @@ const manifest = {
   cliVersion,
   sourceCommit,
   sourceSha256,
+  krillinBuild: krillinBuildRecord,
   integrationPatchSha256: buildRecord.integrationPatchSha256,
   platform: targetPlatform,
   arch: targetArch,
@@ -169,6 +179,7 @@ const manifest = {
   }))
 };
 writeFileSync(join(outputRoot, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+verifyCreatorRuntimeBuild(outputRoot, targetPlatform, targetArch, { buildRoot: krillinBuildRoot });
 console.log(JSON.stringify({ ok: true, outputRoot, resources: manifest.resources.length }));
 
 function prepareSubtitleFonts() {
@@ -335,6 +346,9 @@ function ensureKrillinBuild() {
     cwd: rootDir,
     env: {
       ...process.env,
+      OPENCREATOR_VERSION: JSON.parse(readFileSync(join(desktopDir, 'package.json'), 'utf8')).version,
+      OPENCREATOR_KRILLINAI_TARGET_PLATFORM: targetPlatform,
+      OPENCREATOR_KRILLINAI_TARGET_ARCH: targetArch,
       OPENCREATOR_DESKTOP_TARGET_PLATFORM: targetPlatform,
       OPENCREATOR_DESKTOP_TARGET_ARCH: targetArch,
       OPENCREATOR_KRILLINAI_BUILD_OUTPUT: krillinBuildRoot
@@ -344,29 +358,9 @@ function ensureKrillinBuild() {
 }
 
 function readKrillinBuildManifest() {
-  const path = join(krillinBuildRoot, 'manifest.json');
-  if (!existsSync(path)) {
-    throw new Error(`KrillinAI build manifest is missing: ${path}`);
-  }
-  const manifest = JSON.parse(readFileSync(path, 'utf8'));
-  const cli = manifest?.binaries?.['krillinai-cli'];
-  const server = manifest?.binaries?.['krillinai-server'];
-  if (
-    manifest?.version !== 1
-    || manifest.component !== 'opencreator-krillinai'
-    || typeof manifest.componentVersion !== 'string'
-    || typeof manifest.sourceCommit !== 'string'
-    || !/^[a-f0-9]{64}$/i.test(manifest.sourceSha256 ?? '')
-    || !/^[a-f0-9]{64}$/i.test(manifest.buildRecipeSha256 ?? '')
-    || manifest.platform !== targetPlatform
-    || manifest.arch !== targetArch
-    || manifest.buildVcs !== false
-    || typeof cli?.path !== 'string'
-    || typeof server?.path !== 'string'
-  ) {
-    throw new Error('KrillinAI build manifest is invalid or targets another platform');
-  }
-  return manifest;
+  return verifyKrillinBuild(krillinBuildRoot, krillinBuildIdentity({
+    rootDir, platform: targetPlatform, arch: targetArch
+  }));
 }
 
 function ensureExternalDependencies() {

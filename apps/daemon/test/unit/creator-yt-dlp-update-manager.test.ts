@@ -101,6 +101,73 @@ describe('yt-dlp update manager', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    {
+      bundledVersion: '2026.08.30.000000',
+      source: 'managed',
+      currentVersion: LATEST_VERSION
+    },
+    {
+      bundledVersion: LATEST_VERSION,
+      source: 'bundled',
+      currentVersion: LATEST_VERSION
+    },
+    {
+      bundledVersion: '2026.09.01.000000',
+      source: 'bundled',
+      currentVersion: '2026.09.01.000000'
+    }
+  ])('selects the newest installed runtime after upgrading the bundle to $bundledVersion', async ({
+    bundledVersion,
+    source,
+    currentVersion
+  }) => {
+    root = await mkdtemp(join(tmpdir(), 'creator-yt-dlp-update-'));
+    const updatesRoot = join(root, 'updates');
+    const fetchImpl = releaseFetch(releaseFixture(LATEST_VERSION));
+    const original = await createManager(
+      updatesRoot,
+      await createBundledRuntime(root),
+      fetchImpl
+    );
+    await original.update();
+    original.close();
+
+    const bundledRuntime = await createBundledRuntime(root, bundledVersion);
+    const manager = await createManager(updatesRoot, bundledRuntime, fetchImpl);
+    const expectedStatus = {
+      source,
+      currentVersion,
+      bundledVersion,
+      updateAvailable: false,
+      installedAt: source === 'managed' ? '2026-08-31T00:00:00.000Z' : null
+    };
+    const expectedScript = source === 'bundled'
+      ? bundledRuntime.script
+      : join(updatesRoot, 'versions', LATEST_VERSION, 'yt-dlp');
+
+    expect(manager.status()).toMatchObject(expectedStatus);
+    expect(manager.getRuntime()).toMatchObject({
+      version: currentVersion,
+      script: expectedScript,
+      prefixArgs: [expectedScript]
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    // An older upstream response must not download or activate a downgrade.
+    await manager.update();
+    expect(manager.status()).toMatchObject(expectedStatus);
+    expect(manager.getRuntime().script).toBe(expectedScript);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    manager.close();
+
+    const restarted = await createManager(updatesRoot, bundledRuntime, fetchImpl);
+    expect(restarted.status()).toMatchObject(expectedStatus);
+    expect(restarted.getRuntime().script).toBe(expectedScript);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    restarted.close();
+  });
+
   it('follows trusted GitHub asset redirects before verifying the download', async () => {
     root = await mkdtemp(join(tmpdir(), 'creator-yt-dlp-update-'));
     const bundledRuntime = await createBundledRuntime(root);
@@ -238,12 +305,15 @@ describe('yt-dlp update manager', () => {
   });
 });
 
-async function createBundledRuntime(base: string): Promise<YtDlpRuntime> {
+async function createBundledRuntime(
+  base: string,
+  version = BUNDLED_VERSION
+): Promise<YtDlpRuntime> {
   const script = join(base, 'bundled', 'yt-dlp.cjs');
   await mkdir(join(base, 'bundled'), { recursive: true });
-  await writeFile(script, versionScript(BUNDLED_VERSION));
+  await writeFile(script, versionScript(version));
   return {
-    version: BUNDLED_VERSION,
+    version,
     executable: process.execPath,
     prefixArgs: [script],
     env: {},

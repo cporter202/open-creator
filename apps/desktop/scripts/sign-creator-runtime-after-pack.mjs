@@ -13,6 +13,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { verifyCreatorRuntime } from './creator-runtime-contract.mjs';
+import { verifyCreatorRuntimeBuild } from './creator-runtime-build.mjs';
 import { verifyStickmanRuntime } from './stickman-runtime-contract.mjs';
 import { findDeveloperIdIdentity, withMacSigningKeychain } from './mac-signing.mjs';
 import { prepareMacAppIcon } from './mac-app-icon.mjs';
@@ -34,7 +35,12 @@ const remotionBrowserEntitlements = fileURLToPath(
 
 export async function afterPack(context) {
   await prepareMacAppIcon(context);
-  if (process.env.OPENCREATOR_SIGN_CREATOR_RUNTIME !== '1') return;
+  if (process.env.OPENCREATOR_SIGN_CREATOR_RUNTIME !== '1') {
+    const arch = process.env.OPENCREATOR_DESKTOP_TARGET_ARCH
+      ?? ({ 1: 'x64', 3: 'arm64' }[context.arch]) ?? process.arch;
+    verifyCreatorRuntimeBuild(creatorRuntimeRoot(context), context.electronPlatformName, arch);
+    return;
+  }
   await signDaemonRuntimeBundle(context);
   await signCreatorRuntimeBundle(context);
 }
@@ -100,12 +106,23 @@ export async function signDaemonRuntimeBundle(context, options = {}) {
 }
 
 export async function signCreatorRuntimeBundle(context, options = {}) {
-  return signPackagedRuntime(context, options, {
+  const arch = (options.env ?? process.env).OPENCREATOR_DESKTOP_TARGET_ARCH;
+  const root = creatorRuntimeRoot(context);
+  verifyCreatorRuntimeBuild(root, 'darwin', arch, options);
+  await signPackagedRuntime(context, options, {
     name: 'Creator Runtime',
     relativeRoot: ['creator-runtime', 'krillinai'],
     verifyRuntime: options.verifyRuntime ?? verifyCreatorRuntime,
     javascriptEntitlements: remotionBrowserEntitlements
   });
+  verifyCreatorRuntimeBuild(root, 'darwin', arch, { ...options, allowSigned: true });
+}
+
+function creatorRuntimeRoot(context) {
+  const resources = context.electronPlatformName === 'darwin'
+    ? join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, 'Contents', 'Resources')
+    : join(context.appOutDir, 'resources');
+  return join(resources, 'creator-runtime', 'krillinai');
 }
 
 export async function signStickmanRuntimeBundle(context, options = {}) {
@@ -183,6 +200,16 @@ export function updateManifestHashes(runtimeRoot, signedPaths) {
   const resources = new Map(
     manifest.resources.map(resource => [resource.path, resource])
   );
+  const cliPath = join(runtimeRoot, 'bin', 'krillinai-cli');
+  if (manifest.krillinBuild && signedPaths.some(path => resolve(path) === cliPath)) {
+    if (manifest.cliSigning || resources.get('bin/krillinai-cli')?.sha256 !== manifest.krillinBuild.cliSha256) {
+      throw new Error('KrillinAI CLI must match its unsigned source build before signing');
+    }
+    manifest.cliSigning = {
+      unsignedSha256: manifest.krillinBuild.cliSha256,
+      signedSha256: hashFile(cliPath)
+    };
+  }
   for (const path of signedPaths) {
     const relativePath = relative(runtimeRoot, path).replaceAll('\\', '/');
     const resource = resources.get(relativePath);

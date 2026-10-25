@@ -29,6 +29,7 @@ import { runStapler, submitAndWaitForNotarization } from './apple-notarization.m
 import { prepareElectronBuilderCache } from './electron-builder-cache.mjs';
 import { runParallelStages, runStage } from './script-utils.mjs';
 import { stageReleaseAssets } from './release-assets.mjs';
+import { verifyCreatorRuntimeBuild } from './creator-runtime-build.mjs';
 import {
   hashDirectory as hashStickmanDirectory,
   hashFile as hashStickmanFile,
@@ -57,6 +58,9 @@ const cacheDir = resolve(
 );
 const env = {
   ...process.env,
+  OPENCREATOR_VERSION: JSON.parse(readFileSync(join(desktopDir, 'package.json'), 'utf8')).version,
+  OPENCREATOR_KRILLINAI_TARGET_PLATFORM: platform,
+  OPENCREATOR_KRILLINAI_TARGET_ARCH: arch,
   OPENCREATOR_DESKTOP_TARGET_PLATFORM: platform,
   OPENCREATOR_DESKTOP_TARGET_ARCH: arch,
   OPENCREATOR_DESKTOP_CACHE_DIR: cacheDir,
@@ -104,6 +108,7 @@ await runParallelStages([
     resolve(scriptDir, 'prepare-codex-runtime.mjs')
   ], { cwd: rootDir, env, timeoutMs: 10 * 60_000 })
 ]);
+verifyCreatorRuntimeBuild(resolve(desktopDir, '.pack/creator-runtime/krillinai'), platform, arch);
 const candidates = packageRootCandidates(platform, arch);
 for (const path of candidates) rmSync(path, { recursive: true, force: true });
 
@@ -166,10 +171,9 @@ const packageWithSigningEnvironment = async builderEnv => {
     resolve(desktopDir, '.pack', 'codex-runtime', 'manifest.json'),
     'utf8'
   ));
-  const creatorRuntimeManifest = JSON.parse(readFileSync(
-    resolve(desktopDir, '.pack', 'creator-runtime', 'krillinai', 'manifest.json'),
-    'utf8'
-  ));
+  const creatorRuntimeManifest = verifyCreatorRuntimeBuild(
+    resolve(desktopDir, '.pack/creator-runtime/krillinai'), platform, arch
+  );
   const stickmanRuntimeRoot = resolve(desktopDir, '.pack', 'stickman-runtime');
   const stickmanRuntimeManifest = verifyStickmanRuntime(
     stickmanRuntimeRoot,
@@ -265,6 +269,7 @@ const packageWithSigningEnvironment = async builderEnv => {
     krillinCliVersion: creatorRuntimeManifest.cliVersion,
     krillinSourceCommit: creatorRuntimeManifest.sourceCommit,
     krillinSourceSha256: creatorRuntimeManifest.sourceSha256,
+    krillinBuild: creatorRuntimeManifest.krillinBuild,
     krillinIntegrationPatchSha256: creatorRuntimeManifest.integrationPatchSha256,
     ytDlpRuntimeMode: creatorRuntimeManifest.ytDlp?.mode,
     ytDlpVersion: creatorRuntimeManifest.ytDlp?.version,

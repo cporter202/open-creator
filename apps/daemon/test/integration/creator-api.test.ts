@@ -251,8 +251,11 @@ describe('creator api', () => {
     expect((await request('GET', `/creator/jobs/${jobWithFiles.id}`)).statusCode).toBe(404);
   });
 
-  it('stops an active translation stage and resumes the workflow from that stage', async () => {
+  it.each(['failed', 'succeeded', 'running'] as const)('stops and resumes translation when its parallel download is %s', async downloadStatus => {
     let subtitleRuns = 0;
+    let downloadRuns = 0;
+    let releaseResume!: () => void;
+    const resumeGate = new Promise<void>(resolve => { releaseResume = resolve; });
     const executor: CreatorExecutor = {
       id: 'krillinai',
       async run({ stageRun, signal }) {
@@ -265,6 +268,7 @@ describe('creator api', () => {
             });
             return { outputs: [] };
           }
+          await Promise.race([resumeGate, new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))]);
           return {
             outputs: [
               { kind: 'source_video', status: 'completed', path: null },
@@ -281,7 +285,18 @@ describe('creator api', () => {
         };
       }
     };
-    await setupServer({ creatorExecutors: [executor] });
+    await setupServer({ creatorExecutors: [executor, {
+      id: 'download', async run({ signal }) {
+        if (downloadStatus === 'failed') throw new Error('Source download unavailable');
+        if (downloadStatus === 'running' && ++downloadRuns === 1) {
+          await new Promise<void>(resolve => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+        }
+        return { outputs: [] };
+      }
+    }] });
     const created = await request('POST', '/creator/jobs', {
       projectId: 'project_job_control',
       templateId: 'video-translation',
@@ -290,7 +305,6 @@ describe('creator api', () => {
         sourceType: 'url',
         sourceUrl: 'https://www.youtube.com/watch?v=job-control',
         targetLanguage: 'zh_cn',
-        skipVideoDownload: true,
         composeVideo: true,
         videoFormat: 'horizontal'
       }
@@ -305,9 +319,10 @@ describe('creator api', () => {
     expect(started.statusCode).toBe(200);
 
     const running = await waitForCreatorJob(job.id, candidate => (
-      candidate.stages.at(-1)?.status === 'running'
+      candidate.stages.some((stage: { stageId: string; status: string }) => stage.stageId === 'subtitle' && stage.status === 'running')
+      && candidate.stages.some((stage: { stageId: string; status: string }) => stage.stageId === 'preview-source-video' && stage.status === downloadStatus)
     ));
-    const canceledStageId = running.stages.at(-1).id;
+    const canceledStageId = running.stages.find((stage: { stageId: string }) => stage.stageId === 'subtitle').id;
     const canceled = await request('POST', `/creator/jobs/${job.id}/cancel`);
     expect(canceled.statusCode).toBe(202);
     expect(canceled.json()).toMatchObject({
@@ -320,7 +335,8 @@ describe('creator api', () => {
 
     const stopped = await waitForCreatorJob(job.id, candidate => (
       candidate.status === 'canceled'
-      && candidate.stages.at(-1)?.status === 'canceled'
+      && candidate.stages.find((stage: { id: string }) => stage.id === canceledStageId)?.status === 'canceled'
+      && candidate.stages.every((stage: { status: string }) => !['queued', 'running'].includes(stage.status))
     ));
     expect(stopped.artifacts).toEqual([]);
     const repeatedCancel = await request('POST', `/creator/jobs/${job.id}/cancel`);
@@ -330,8 +346,13 @@ describe('creator api', () => {
       stage: { id: canceledStageId, status: 'canceled' }
     });
 
-    const resumed = await request('POST', `/creator/jobs/${job.id}/resume`);
-    expect(resumed.statusCode).toBe(202);
+    const resumeResponses = await Promise.all([
+      request('POST', `/creator/jobs/${job.id}/resume`),
+      request('POST', `/creator/jobs/${job.id}/resume`)
+    ]);
+    expect(resumeResponses.map(response => response.statusCode).sort()).toEqual([200, 202]);
+    const resumed = resumeResponses.find(response => response.statusCode === 202)!;
+    expect(resumeResponses[0].json().stage.id).toBe(resumeResponses[1].json().stage.id);
     expect(resumed.json()).toMatchObject({
       control: 'resumed',
       stage: {
@@ -343,24 +364,64 @@ describe('creator api', () => {
       }
     });
 
+    releaseResume();
     const completed = await waitForCreatorJob(job.id, candidate => (
       candidate.status === 'completed'
       && candidate.stages.at(-1)?.stageId === 'render-horizontal'
       && candidate.stages.at(-1)?.status === 'succeeded'
     ));
-    expect(completed.stages.map((stage: { stageId: string; status: string }) => (
+    expect(completed.stages.filter((stage: { stageId: string }) => stage.stageId !== 'preview-source-video').map((stage: { stageId: string; status: string }) => (
       `${stage.stageId}:${stage.status}`
     ))).toEqual([
       'subtitle:canceled',
       'subtitle:succeeded',
       'render-horizontal:succeeded'
     ]);
-    expect(completed.stages[1]).toMatchObject({
+    expect(completed.stages.find((stage: { id: string }) => stage.id === resumed.json().stage.id)).toMatchObject({
       progress: {
         workflow: true,
         resumedFromStageRunId: canceledStageId
       }
     });
+    expect(subtitleRuns).toBe(2);
+    expect((await request('POST', `/creator/jobs/${job.id}/resume`)).statusCode).toBe(409);
+  });
+
+  it('resumes only the canceled source download after subtitles have completed', async () => {
+    let downloadRuns = 0;
+    const translationStages: string[] = [];
+    await setupServer({ creatorExecutors: [{ id: 'krillinai', async run({ stageRun }) {
+      translationStages.push(stageRun.stageId);
+      return { outputs: [{ kind: stageRun.stageId === 'subtitle' ? 'target_subtitle' : 'horizontal_video', status: 'completed', path: null }] };
+    } }, { id: 'download', async run({ signal }) {
+      if (++downloadRuns === 1) {
+        await new Promise<void>(resolve => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return { outputs: [] };
+      }
+      return { outputs: [{ kind: 'source_video', status: 'completed', path: null }] };
+    } }] });
+    const { job } = (await request('POST', '/creator/jobs', { projectId: 'project_download_resume', templateId: 'video-translation', state: {
+      sourceType: 'url', sourceUrl: 'https://youtu.be/download-resume', composeVideo: true, videoFormat: 'horizontal'
+    } })).json();
+    await request('POST', `/creator/jobs/${job.id}/actions`, { action: 'run-stage', expectedRevision: job.revision,
+      idempotencyKey: 'start-download-resume', input: { stageId: 'subtitle', workflow: true } });
+    const waiting = await waitForCreatorJob(job.id, candidate => candidate.stages.some((stage: { stageId: string; status: string }) => stage.stageId === 'subtitle' && stage.status === 'succeeded')
+      && candidate.stages.some((stage: { stageId: string; status: string }) => stage.stageId === 'preview-source-video' && stage.status === 'running'));
+    const download = waiting.stages.find((stage: { stageId: string }) => stage.stageId === 'preview-source-video');
+    expect((await request('POST', `/creator/jobs/${job.id}/cancel`)).statusCode).toBe(202);
+    await waitForCreatorJob(job.id, candidate => candidate.stages.find((stage: { id: string }) => stage.id === download.id)?.status === 'canceled');
+    const resumed = await request('POST', `/creator/jobs/${job.id}/resume`);
+    expect(resumed.statusCode).toBe(202);
+    expect(resumed.json().stage).toMatchObject({ stageId: 'preview-source-video', progress: {
+      backgroundSourceDownload: true, workflowParentStageRunId: download.progress.workflowParentStageRunId, resumedFromStageRunId: download.id
+    } });
+    await waitForCreatorJob(job.id, candidate => candidate.stages.some((stage: { stageId: string; status: string }) => stage.stageId === 'render-horizontal' && stage.status === 'succeeded'));
+    expect(translationStages).toEqual(['subtitle', 'render-horizontal']);
+    expect(downloadRuns).toBe(2);
+    expect((await request('POST', `/creator/jobs/${job.id}/resume`)).statusCode).toBe(409);
   });
 
   it('replays creator job creation after the response is lost', async () => {

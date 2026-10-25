@@ -41,7 +41,7 @@ func TestBatchTranslateSrtBlocksKeepsOriginalAfterReviewAndRepairExhaustion(t *t
 						return "invalid-json", nil
 					}
 					return `{"accepted_ids":[],"reason":"一本书改变了原文的大量藏书。"}`, nil
-				case strings.HasPrefix(prompt, "任务：translation_length_split\n"):
+				case strings.HasPrefix(prompt, "任务：translation_length_split\n") || strings.HasPrefix(prompt, "Task: translation_length_split\n"):
 					splits++
 					return `{"sentences":[]}`, nil
 				}

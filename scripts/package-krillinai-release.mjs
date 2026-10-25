@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { krillinReleaseAssetNames } from '../apps/desktop/scripts/release-assets.mjs';
+import { krillinBuildIdentity, verifyKrillinBuild } from './krillinai-build-contract.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultRootDir = resolve(dirname(scriptPath), '..');
@@ -62,7 +63,7 @@ export function packageKrillinRelease(options = {}) {
     });
   }
 
-  const manifest = readBuildManifest(buildRoot, version, platform, arch);
+  const manifest = verifyKrillinBuild(buildRoot, krillinBuildIdentity({ rootDir, version, platform, arch }));
   const assetNames = krillinReleaseAssetNames(version, platform, arch);
   const specifications = [
     { assetName: assetNames[0], binaryName: 'krillinai-server' },
@@ -88,6 +89,9 @@ export function packageKrillinRelease(options = {}) {
       const executableName = `${specification.binaryName}${executableSuffix}`;
       mkdirSync(join(packageRoot, 'config'), { recursive: true });
       copyFileSync(source, join(packageRoot, executableName));
+      if (hashFile(join(packageRoot, executableName)) !== binary.sha256) {
+        throw new Error('KrillinAI release binary changed while copying');
+      }
       if (platform !== 'win32') {
         chmodSync(join(packageRoot, executableName), 0o755);
       }
@@ -118,6 +122,7 @@ export function packageKrillinRelease(options = {}) {
       return archivePath;
     });
 
+    verifyKrillinBuild(buildRoot, krillinBuildIdentity({ rootDir, version, platform, arch }));
     if (process.env.GITHUB_ENV) {
       appendFileSync(
         process.env.GITHUB_ENV,
@@ -139,34 +144,6 @@ export function packageKrillinRelease(options = {}) {
   } finally {
     rmSync(stagingRoot, { recursive: true, force: true });
   }
-}
-
-function readBuildManifest(buildRoot, version, platform, arch) {
-  const path = join(buildRoot, 'manifest.json');
-  if (!existsSync(path)) {
-    throw new Error(`KrillinAI build manifest is missing: ${path}`);
-  }
-  const manifest = JSON.parse(readFileSync(path, 'utf8'));
-  if (
-    manifest.version !== 1
-    || manifest.component !== 'opencreator-krillinai'
-    || manifest.componentVersion !== version
-    || manifest.platform !== platform
-    || manifest.arch !== arch
-    || manifest.buildVcs !== false
-  ) {
-    throw new Error('KrillinAI build manifest does not match the release target');
-  }
-  for (const name of ['krillinai-server', 'krillinai-cli']) {
-    const binary = manifest.binaries?.[name];
-    if (
-      typeof binary?.path !== 'string'
-      || !/^[a-f0-9]{64}$/i.test(binary.sha256 ?? '')
-    ) {
-      throw new Error(`KrillinAI build manifest is missing ${name}`);
-    }
-  }
-  return manifest;
 }
 
 function createArchive({ archivePath, packageName, stagingRoot, windowsZip }) {

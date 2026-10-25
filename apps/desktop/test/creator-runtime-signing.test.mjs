@@ -10,6 +10,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { verifyCreatorRuntime } from '../scripts/creator-runtime-contract.mjs';
+import { verifyCreatorRuntimeBuild } from '../scripts/creator-runtime-build.mjs';
+import { createKrillinBuildFixture, runtimeBuildMetadata } from './helpers/krillinai-build.mjs';
 import { verifyStickmanRuntime } from '../scripts/stickman-runtime-contract.mjs';
 import {
   signDaemonRuntimeBundle,
@@ -116,6 +118,7 @@ describe('Creator Runtime Developer ID signing', () => {
         }
       }
     }, {
+      ...fixture.build,
       env: {
         OPENCREATOR_APPLE_TEAM_ID: 'NVRH5R5DJ5',
         OPENCREATOR_DESKTOP_TARGET_ARCH: 'arm64'
@@ -144,6 +147,14 @@ describe('Creator Runtime Developer ID signing', () => {
       join(fixture.runtimeRoot, 'manifest.json'),
       'utf8'
     ));
+    expect(manifest.cliSigning).toEqual({
+      unsignedSha256: fixture.build.manifest.binaries['krillinai-cli'].sha256,
+      signedSha256: hashFile(fixture.binaryPaths[0])
+    });
+    expect(() => verifyCreatorRuntimeBuild(fixture.runtimeRoot, 'darwin', 'arm64', {
+      ...fixture.build, allowSigned: true
+    })).not.toThrow();
+    expect(() => verifyCreatorRuntimeBuild(fixture.runtimeRoot, 'darwin', 'arm64', fixture.build)).toThrow('signing record');
     for (const path of fixture.binaryPaths) {
       const relativePath = relative(fixture.runtimeRoot, path)
         .replaceAll('\\', '/');
@@ -169,6 +180,7 @@ describe('Creator Runtime Developer ID signing', () => {
     const fixture = createFixture({ javascriptRuntime: true });
     const signBinary = vi.fn();
     await signCreatorRuntimeBundle(createContext(fixture.appOutDir), {
+      ...fixture.build,
       env: signingEnv(), findIdentity: () => 'Developer ID Application: Junxi YIN (NVRH5R5DJ5)',
       findBinaries: () => fixture.binaryPaths, signBinary
     });
@@ -265,6 +277,8 @@ function signingEnv() {
 function createFixture(options = {}) {
   const root = mkdtempSync(join(tmpdir(), 'opencreator-runtime-signing-'));
   temporaryDirectories.push(root);
+  const build = createKrillinBuildFixture(root);
+  const metadata = runtimeBuildMetadata(build.manifest);
   const appOutDir = join(root, 'mac-arm64');
   const runtimeRoot = join(
     appOutDir,
@@ -280,7 +294,7 @@ function createFixture(options = {}) {
     'bin/ffprobe': 'ffprobe',
     'bin/yt-dlp': 'yt-dlp',
     ...(options.javascriptRuntime ? { 'bin/node': 'node' } : {}),
-    'build-record.json': '{"version":1}',
+    'build-record.json': JSON.stringify({ version: 1, ...metadata }),
     'subtitle-style.json': '{"version":1}'
   };
   for (const [relativePath, contents] of Object.entries(files)) {
@@ -299,6 +313,7 @@ function createFixture(options = {}) {
     cliVersion: 'test',
     sourceCommit: 'test',
     sourceSha256: 'b'.repeat(64),
+    ...metadata,
     integrationPatchSha256: 'a'.repeat(64),
     platform: 'darwin',
     arch: 'arm64',
@@ -317,6 +332,7 @@ function createFixture(options = {}) {
     `${JSON.stringify(manifest, null, 2)}\n`
   );
   return {
+    build,
     appOutDir,
     runtimeRoot,
     binaryPaths: [

@@ -11,6 +11,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { packageKrillinRelease } from '../../../scripts/package-krillinai-release.mjs';
+import { createKrillinBuildFixture } from './helpers/krillinai-build.mjs';
+import { krillinBuildIdentity } from '../../../scripts/krillinai-build-contract.mjs';
 
 const directories = [];
 
@@ -76,7 +78,7 @@ describe('KrillinAI release packages', () => {
 function createFixture() {
   const root = mkdtempSync(join(tmpdir(), 'krillinai-package-fixture-'));
   directories.push(root);
-  const buildRoot = join(root, 'build');
+  const { buildRoot } = createKrillinBuildFixture(root, { version: '3.0.0' });
   const outputDir = join(root, 'release');
   const configDir = join(root, 'runtime', 'krillinai', 'config');
   const binDir = join(buildRoot, 'bin');
@@ -89,15 +91,17 @@ function createFixture() {
   for (const name of ['krillinai-server', 'krillinai-cli']) {
     const path = join(binDir, name);
     writeFileSync(path, `${name}\n`);
+    writeFileSync(join(buildRoot, 'artifacts', name), `${name}\n`);
     binaries[name] = {
       path: `bin/${name}`,
-      sha256: hashFile(path)
+      sha256: hashFile(path),
+      artifact: `artifacts/${name}`
     };
   }
   writeFileSync(join(buildRoot, 'manifest.json'), JSON.stringify({
     version: 1,
     component: 'opencreator-krillinai',
-    componentVersion: '3.0.0',
+    ...krillinBuildIdentity({ rootDir: root, platform: 'darwin', arch: 'arm64' }),
     platform: 'darwin',
     arch: 'arm64',
     buildVcs: false,

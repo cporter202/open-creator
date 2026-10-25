@@ -129,7 +129,10 @@ class DefaultYtDlpUpdateManager implements YtDlpUpdateManager {
   async initialize(): Promise<void> {
     this.state = parseState(await readPrivateJsonFile(this.statePath).catch(() => undefined));
     const active = this.state.active;
-    if (active === undefined) return;
+    if (
+      active === undefined
+      || compareVersions(active.version, this.input.bundledRuntime.version) <= 0
+    ) return;
     const path = this.versionPath(active.version);
     try {
       if (await hashFile(path) !== active.sha256) {
@@ -165,7 +168,9 @@ class DefaultYtDlpUpdateManager implements YtDlpUpdateManager {
       ),
       lastCheckedAt: this.state.lastCheckedAt ?? null,
       lastCheckAttemptAt: this.state.lastCheckAttemptAt ?? null,
-      installedAt: this.state.active?.installedAt ?? null
+      installedAt: this.activeRuntime === undefined
+        ? null
+        : this.state.active?.installedAt ?? null
     };
   }
 

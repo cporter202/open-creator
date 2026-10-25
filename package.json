@@ -64,6 +64,9 @@
       "vite@>=6.0.0 <6.4.4": "6.4.4",
       "zod@<4.6.6": "4.6.6",
       "body-parser@>=2.0.0 <2.4.0": "2.4.0"
+    },
+    "patchedDependencies": {
+      "jassub@2.5.23": "patches/jassub@2.5.23.patch"
     }
   }
 }

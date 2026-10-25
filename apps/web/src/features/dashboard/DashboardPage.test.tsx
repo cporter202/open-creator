@@ -695,7 +695,7 @@ function latestTranslationArtifact(job: CreatorJob, kind: string) {
 async function startVideoTranslation() {
   const workspace = screen.getByRole('region', { name: '视频翻译操作区' });
   fireEvent.click(within(workspace).getByRole('button', { name: '开始翻译' }));
-  await screen.findByRole('heading', { name: '视频翻译项目' });
+  await screen.findByRole('textbox', { name: '横屏字幕 1' });
 }
 
 function completedAgentTurn(jobId: string, content: string) {
@@ -1130,6 +1130,121 @@ describe('DashboardPage', () => {
     openTranslationPanel('字幕样式');
     fireEvent.click(screen.getByRole('button', { name: '自定义样式' }));
     expect(screen.getByRole('region', { name: '同步视频预览' }).querySelector('.video-result-player-frame')).toHaveAttribute('data-ratio', '9:16');
+  });
+
+  it('returns from the translation editor to project outputs without leaving the project', async () => {
+    const onSelectPrompt = vi.fn();
+    const creatorService = createInMemoryCreatorService();
+    render(
+      <DashboardPage
+        onSelectPrompt={onSelectPrompt}
+        creatorService={creatorService}
+        videoMetadataService={{
+          getVideoMetadata: vi.fn(async () => ({
+            platform: 'youtube' as const,
+            title: '测试视频标题',
+            authorName: '测试作者',
+            thumbnailUrl: 'https://i.ytimg.com/vi/test/hqdefault.jpg'
+          }))
+        }}
+      />
+    );
+
+    openBlankWorkspace('视频翻译', '空白视频翻译');
+
+    expect(screen.getByRole('heading', { name: '视频翻译配音' })).toBeInTheDocument();
+    expect(screen.getByRole('complementary', { name: 'OpenCreator' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '拖放视频到这里' })).toBeInTheDocument();
+    expect(screen.getByRole('list', { name: '支持的平台' }).querySelectorAll('li')).toHaveLength(10);
+    fireEvent.change(screen.getByRole('textbox', { name: '视频链接' }), {
+      target: { value: 'https://www.youtube.com/watch?v=test' }
+    });
+    expect(screen.getByRole('img', { name: 'YouTube 视频缩略图' })).toHaveAttribute(
+      'src',
+      'https://i.ytimg.com/vi/test/hqdefault.jpg'
+    );
+    expect(await screen.findByText('测试视频标题')).toBeInTheDocument();
+    expect(screen.getByText('YouTube 视频 · 测试作者')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '播放 YouTube 视频预览' }));
+    expect(screen.getByTitle('YouTube 视频预览')).toHaveAttribute('src', 'https://www.youtube-nocookie.com/embed/test');
+    expect(screen.queryByRole('heading', { name: '拖放视频到这里' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '改用本地视频' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: '视频链接' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '继续' }));
+    expect(screen.getByRole('heading', { name: '设置翻译语言' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: '源语言' })).toHaveValue('en');
+    expect(screen.getByRole('combobox', { name: '翻译为' })).toHaveValue('zh_cn');
+    expect(screen.queryByRole('switch', { name: '合成字幕视频' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('任务摘要')).toHaveTextContent('English → 简体中文');
+    expect(screen.getByLabelText('任务摘要')).toHaveClass('video-translation-summary', 'creator-task-summary');
+    expect(screen.getByRole('complementary', { name: 'OpenCreator' })).toContainElement(screen.getByLabelText('任务摘要'));
+    await startVideoTranslation();
+    expect(onSelectPrompt).not.toHaveBeenCalled();
+    expect(screen.getByRole('heading', { name: '视频翻译工作区' })).toBeVisible();
+    expect(screen.getByRole('textbox', { name: '横屏字幕 1' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: '保存字幕' })).not.toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole('region', { name: '视频翻译项目产出' })).getByRole('button', { name: '返回' }));
+    expect(await screen.findByRole('tab', { name: '作品' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('button', { name: '项目 V1' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '返回工作区' }));
+    expect(screen.getByRole('textbox', { name: '横屏字幕 1' })).toBeVisible();
+  });
+
+
+  it('preserves custom subtitle settings across result panels without starting video output', async () => {
+    const service = createInMemoryCreatorService();
+    const applyAction = vi.spyOn(service, 'applyAction');
+    render(<DashboardPage onSelectPrompt={vi.fn()} creatorService={service} />);
+    openBlankWorkspace('视频翻译', '空白视频翻译');
+    fireEvent.change(screen.getByRole('textbox', { name: '视频链接' }), {
+      target: { value: 'https://www.youtube.com/watch?v=test' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '继续' }));
+    await startVideoTranslation();
+    fireEvent.click(screen.getByRole('button', { name: '字幕样式' }));
+    fireEvent.click(screen.getByRole('button', { name: '在下' }));
+    fireEvent.click(screen.getByRole('button', { name: '自定义样式' }));
+    changeControl(screen.getByRole('combobox', { name: '字幕字体' }), { target: { value: 'rounded' } });
+    changeControl(screen.getByRole('combobox', { name: '字幕大小' }), { target: { value: 'large' } });
+    fireEvent.click(screen.getByRole('button', { name: '选择译文颜色' }));
+    fireEvent.click(screen.getByRole('button', { name: '#FFE45C' }));
+    fireEvent.keyDown(screen.getByRole('button', { name: '#FFE45C' }), { key: 'Escape' });
+    fireEvent.click(screen.getByRole('button', { name: '完成' }));
+    fireEvent.click(screen.getByRole('button', { name: '任务设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '字幕样式' }));
+    expect(screen.getByRole('button', { name: '在下' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: '自定义样式' }));
+    expect(screen.getByRole('combobox', { name: '字幕字体' })).toHaveAttribute('data-value', 'rounded');
+    expect(screen.getByRole('combobox', { name: '字幕大小' })).toHaveAttribute('data-value', 'large');
+    expect(screen.getByRole('button', { name: '选择译文颜色' })).toHaveAttribute('aria-label', '选择译文颜色');
+    expect(screen.getByRole('button', { name: '选择译文颜色' }).parentElement).toHaveTextContent('#FFE45C');
+    expect(screen.getByRole('button', { name: '选择原文颜色' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '完成' }));
+    fireEvent.click(screen.getByRole('switch', { name: '双语字幕' }));
+    fireEvent.click(screen.getByRole('button', { name: '自定义样式' }));
+    expect(screen.queryByRole('button', { name: '选择原文颜色' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '选择译文颜色' }).parentElement).toHaveTextContent('#FFE45C');
+    expect(applyAction.mock.calls.filter(([, request]) => request.action === 'run-stage')).toHaveLength(1);
+  });
+
+
+  it('keeps style changes as a draft without output or a new result version', async () => {
+    const service = createInMemoryCreatorService();
+    const applyAction = vi.spyOn(service, 'applyAction');
+    render(<DashboardPage onSelectPrompt={vi.fn()} creatorService={service} />);
+    openBlankWorkspace('视频翻译', '空白视频翻译');
+    fireEvent.change(screen.getByRole('textbox', { name: '视频链接' }), {
+      target: { value: 'https://www.youtube.com/watch?v=test' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '继续' }));
+    await startVideoTranslation();
+    fireEvent.click(screen.getByRole('button', { name: '自定义样式' }));
+    changeControl(screen.getByRole('combobox', { name: '字幕字体' }), { target: { value: 'rounded' } });
+    fireEvent.click(screen.getByRole('button', { name: '完成' }));
+    await waitFor(async () => expect((await service.getJob('creator_test_job_1')).job.state).toMatchObject({ subtitleStyle: { fontPreset: 'rounded' }, composeVideo: false, resultVersion: 1 }));
+    expect(screen.getByRole('button', { name: '项目 V1' })).toBeVisible();
+    expect(applyAction.mock.calls.filter(([, request]) => request.action === 'run-stage').map(([, request]) => request.input.stageId)).toEqual(['subtitle']);
+    expect(applyAction.mock.calls.some(([, request]) => request.action === 'commit-version')).toBe(false);
   });
 
   it('submits public video link analysis from the dashboard', async () => {

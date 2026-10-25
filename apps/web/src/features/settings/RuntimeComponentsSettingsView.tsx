@@ -70,6 +70,25 @@ export function RuntimeComponentsSettingsView(props: {
       <section className="settings-section settings-management runtime-components-settings" aria-labelledby="runtime-components-title">
         <SettingsHeader />
         <RuntimeManagedComponents controller={props.controller} componentId={props.componentId} onReturn={props.onReturn} />
+        <article className="runtime-component-item runtime-component-row">
+          <div className="runtime-component-heading">
+            <div>
+              <div className="runtime-component-title">
+                <h2 className="runtime-component-name"><img className="runtime-component-logo" src="/components/yt-dlp.png" width="26" height="26" alt="" />yt-dlp nightly</h2>
+                <span data-status={hasIssue ? 'failed' : 'checking'}>{hasIssue
+                  ? localize('状态读取失败', 'Status unavailable', 'Status är inte tillgänglig')
+                  : t('settings.runtimeComponents.loading')}</span>
+              </div>
+              <p>{t('settings.runtimeComponents.ytDlpDescription')}</p>
+            </div>
+          </div>
+          <footer className="runtime-component-footer">
+            <button className="settings-secondary-button" type="button" disabled={busy}
+              onClick={() => void props.controller.checkYtDlpUpdate(true).catch(() => undefined)}>
+              <RefreshCw size={15} aria-hidden="true" />
+              {localize('重新检查', 'Check again', 'Kontrollera igen')}
+            </button>
+          </footer>
         {!hasIssue ? (
           <div className="settings-state">
             <LoaderCircle className="settings-spin" size={17} aria-hidden="true" />
@@ -87,6 +106,7 @@ export function RuntimeComponentsSettingsView(props: {
             onDismiss={props.controller.dismissIssue}
           />
         )}
+        </article>
       </section>
     );
   }

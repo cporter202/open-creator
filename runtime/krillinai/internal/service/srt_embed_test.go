@@ -169,11 +169,9 @@ func TestHorizontalAssUsesCustomSubtitleStyle(t *testing.T) {
 	if !strings.Contains(ass, ",4,1.5,2,10,10,44,1") {
 		t.Fatalf("custom outline/margin missing:\n%s", ass)
 	}
-	if strings.Count(ass, "Dialogue:") != 2 ||
-		!strings.Contains(ass, `{\rMajor}{\an2}{\fad(120,180)\blur1}{\1a&HFF&\2a&HFF&\3a&HFF&}主字幕`) ||
-		!strings.Contains(ass, `{\rMajor}{\an2}{\fad(120,180)\blur1}{\blur0\shad0}主字幕`) {
-		t.Fatalf("custom dialogue tags missing:\n%s", ass)
-	}
+	assertASSLayers(t, ass,
+		`{\rMajor}{\an2}{\fad(120,180)\blur1}{\1a&HFF&\2a&HFF&\3a&HFF&}主字幕\N{\rMinor}{\an2}{\1a&HFF&\2a&HFF&\3a&HFF&}副字幕`,
+		`{\rMajor}{\an2}{\fad(120,180)\blur1}{\blur0\shad0}主字幕\N{\rMinor}{\an2}{\blur0\shad0}副字幕`)
 }
 
 func TestHorizontalAssWrapsLargeFontChineseSubtitle(t *testing.T) {
@@ -385,11 +383,9 @@ func TestBilingualTranslationOnBottomKeepsSemanticStylesAndShadow(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Count(string(data), "Dialogue:") != 2 ||
-				!strings.Contains(string(data), `{\rMinor}{\an2}{\1a&HFF&\2a&HFF&\3a&HFF&}Source\N{\rMajor}{\an2}{\xshad-4\yshad6\blur2.5}{\1a&HFF&\2a&HFF&\3a&HFF&}Translation`) ||
-				!strings.Contains(string(data), `{\rMinor}{\an2}{\blur0\shad0}Source\N{\rMajor}{\an2}{\xshad-4\yshad6\blur2.5}{\blur0\shad0}Translation`) {
-				t.Fatalf("subtitle roles or shadow reset order are wrong: %s", data)
-			}
+			assertASSLayers(t, string(data),
+				`{\rMinor}{\an2}{\1a&HFF&\2a&HFF&\3a&HFF&}Source\N{\rMajor}{\an2}{\xshad-4\yshad6\blur2.5}{\1a&HFF&\2a&HFF&\3a&HFF&}Translation`,
+				`{\rMinor}{\an2}{\blur0\shad0}Source\N{\rMajor}{\an2}{\xshad-4\yshad6\blur2.5}{\blur0\shad0}Translation`)
 		})
 	}
 }
@@ -476,5 +472,24 @@ func TestVerticalAssSplitsLongChineseAcrossTime(t *testing.T) {
 	}
 	if strings.Contains(ass, `\N`) {
 		t.Fatalf("long vertical Chinese subtitle should be split across time, not stacked with line breaks: %s", ass)
+	}
+}
+
+// Check both shadow and foreground passes, including role reset and tag order.
+func assertASSLayers(t *testing.T, ass, shadow, foreground string) {
+	t.Helper()
+	var lines [][]string
+	for _, line := range strings.Split(ass, "\n") {
+		if strings.HasPrefix(line, "Dialogue:") {
+			lines = append(lines, strings.SplitN(line, ",", 10))
+		}
+	}
+	if len(lines) != 2 {
+		t.Fatalf("expected shadow and foreground dialogues: %s", ass)
+	}
+	for i, text := range []string{shadow, foreground} {
+		if len(lines[i]) != 10 || lines[i][0] != fmt.Sprintf("Dialogue: %d", i) || lines[i][9] != text {
+			t.Fatalf("layer %d has incorrect subtitle roles or tags: %v", i, lines[i])
+		}
 	}
 }

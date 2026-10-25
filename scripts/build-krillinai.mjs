@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -6,15 +5,19 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync
 } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { downloadGoModules } from './download-go-modules.mjs';
+import {
+  assertKrillinBuildIdentity,
+  hashKrillinFile as hashFile,
+  krillinBuildIdentity,
+  verifyKrillinBuild
+} from './krillinai-build-contract.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const rootDir = resolve(dirname(scriptPath), '..');
@@ -41,13 +44,8 @@ const artifactDir = join(outputRoot, 'artifacts');
 const executableSuffix = targetPlatform === 'win32' ? '.exe' : '';
 const version = process.env.OPENCREATOR_VERSION?.trim()
   || JSON.parse(readFileSync(join(rootDir, 'apps', 'desktop', 'package.json'), 'utf8')).version;
-const sourceCommit = gitOutput(['rev-parse', 'HEAD']) || 'unknown';
-const sourceSha256 = hashSourceTree(sourceRoot);
-const buildRecipeSha256 = createHash('sha256')
-  .update(readFileSync(scriptPath))
-  .update('\0')
-  .update(readFileSync(join(rootDir, 'scripts', 'download-go-modules.mjs')))
-  .digest('hex');
+const identityOptions = { rootDir, platform: targetPlatform, arch: targetArch, version };
+const identity = krillinBuildIdentity(identityOptions);
 const testOnly = process.argv.includes('--test-only');
 const runTests = testOnly || process.argv.includes('--test');
 const targets = [
@@ -77,6 +75,7 @@ if (
   process.exit(0);
 }
 
+rmSync(manifestPath, { force: true });
 mkdirSync(binDir, { recursive: true });
 mkdirSync(artifactDir, { recursive: true });
 if (!runTests) prepareGoModules(targetGoEnvironment());
@@ -127,44 +126,22 @@ for (const targetBinary of targets) {
 const manifest = {
   version: 1,
   component: 'opencreator-krillinai',
-  componentVersion: version,
-  sourceCommit,
-  sourceSha256,
-  buildRecipeSha256,
-  platform: targetPlatform,
-  arch: targetArch,
+  ...identity,
   goVersion: commandOutput('go', ['version']),
   buildVcs: false,
   binaries
 };
+// Never label a binary with a source snapshot that changed during compilation.
+assertKrillinBuildIdentity(identity, krillinBuildIdentity(identityOptions));
 writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 console.log(JSON.stringify({ ok: true, reused: false, outputRoot, binaries }));
 
 function canReuseBuild(path) {
   if (!existsSync(path)) return false;
   try {
-    const manifest = JSON.parse(readFileSync(path, 'utf8'));
-    if (
-      manifest.version !== 1
-      || manifest.component !== 'opencreator-krillinai'
-      || manifest.componentVersion !== version
-      || manifest.sourceCommit !== sourceCommit
-      || manifest.sourceSha256 !== sourceSha256
-      || manifest.buildRecipeSha256 !== buildRecipeSha256
-      || manifest.platform !== targetPlatform
-      || manifest.arch !== targetArch
-      || manifest.buildVcs !== false
-    ) {
-      return false;
-    }
-    return Object.values(manifest.binaries ?? {}).every(binary => {
-      const path = resolve(outputRoot, binary.path);
-      const artifact = resolve(outputRoot, binary.artifact);
-      return existsSync(path)
-        && existsSync(artifact)
-        && hashFile(path) === binary.sha256
-        && hashFile(artifact) === binary.sha256;
-    }) && Object.keys(manifest.binaries ?? {}).length === targets.length;
+    verifyKrillinBuild(outputRoot, identity);
+    assertKrillinBuildIdentity(identity, krillinBuildIdentity(identityOptions));
+    return true;
   } catch {
     return false;
   }
@@ -221,56 +198,6 @@ function verifyNoVcsMetadata(path) {
 function isNativeTarget() {
   return targetPlatform === normalizePlatform(process.platform)
     && targetArch === normalizeArch(process.arch);
-}
-
-function hashSourceTree(root) {
-  const digest = createHash('sha256');
-  for (const path of listSourceFiles(root)) {
-    const relativePath = relative(root, path).replaceAll('\\', '/');
-    digest.update(relativePath).update('\0');
-    digest.update(readFileSync(path)).update('\0');
-  }
-  return digest.digest('hex');
-}
-
-function listSourceFiles(root) {
-  const files = [];
-  visit(root);
-  return files.sort();
-
-  function visit(current) {
-    for (const entry of readdirSync(current, { withFileTypes: true })) {
-      if (
-        entry.name === '.git'
-        || entry.name === 'build'
-        || entry.name === 'dist'
-        || entry.name === '.tmp'
-        || entry.name === 'bin'
-        || entry.name === 'models'
-        || entry.name === 'uploads'
-        || entry.name === '.DS_Store'
-        || entry.name.endsWith('.log')
-        || (current === join(root, 'config') && entry.name === 'config.toml')
-      ) {
-        continue;
-      }
-      const path = join(current, entry.name);
-      if (entry.isDirectory()) visit(path);
-      else if (entry.isFile()) files.push(path);
-    }
-  }
-}
-
-function hashFile(path) {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
-}
-
-function gitOutput(args) {
-  try {
-    return commandOutput('git', args, rootDir);
-  } catch {
-    return '';
-  }
 }
 
 function commandOutput(command, args, cwd = rootDir) {

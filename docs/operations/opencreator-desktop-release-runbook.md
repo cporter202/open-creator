@@ -34,7 +34,7 @@ pnpm desktop:package
 2. pnpm 9.15.0。
 3. macOS 打包机使用完整 Xcode 26 或更新版本，以编译明暗外观一致的应用图标；签名与公证环境还需提供 `codesign`、`notarytool` 和 `stapler`。
 4. Windows 构建机允许执行 PowerShell 和 NSIS 打包工具。
-5. 仓库全量测试、类型检查和构建通过。
+5. 发布流程只负责安装包生成、签名、公证、资源一致性校验和附件发布；功能测试属于独立的开发 CI，不作为发布的前置条件。
 6. 打包脚本会删除目标架构旧目录，并要求构建后只找到一个 fresh package root。
 7. Codex Runtime 三个平台清单中的 npm tarball integrity 和逐文件 SHA-256 已固定。
 8. Creator Runtime 的 KrillinAI、ffmpeg、ffprobe 下载地址和 SHA-256 已固定；yt-dlp 在在线打包前解析最新 nightly，并固定本次下载地址和 SHA-256。
@@ -47,21 +47,21 @@ Desktop 使用 `resources/icon.png` 作为各平台统一的应用图标源。ma
 
 1. 更新 `apps/desktop/package.json` 的版本。
 2. 确认 GitHub Release 发布权限、签名凭据和目标版本更新元数据流程可用。
-3. 先推送版本提交到 `master`，等待同一提交的 CI 通过，再从 `master` 手动运行 `.github/workflows/desktop-release.yml`，并选择 `target=all`。CI 会把纯发布基础设施改动分流到 release checks；产品改动并行执行 unit、compile 和 Web/Desktop parity。
-4. 完整候选工作流使用 `macos-15-intel`、`macos-15` 和 `windows-latest` 并行构建三个原生目标平台，任一 matrix job 失败会自动取消 sibling jobs。macOS 使用正式 Developer ID 签名和 Apple 公证。完整功能回归在本机对待发布提交完成；远端三个平台统一运行 `e2e:package:smoke`，验证刚生成的真实 App、内嵌 Runtime 和平台能力，不重复 macOS arm64 的完整 packaged App E2E。单平台运行只用于诊断，不能用于正式发布。
-5. 三个平台和 Linux KrillinAI 附件全部成功后，工作流计算排除发布专用文件的应用构建输入 SHA-256，并写入绑定该指纹、Git commit、workflow run 和仓库的候选身份凭据。候选附件保存于该 workflow run，不允许构建后替换。
-6. 候选全绿后才创建并推送 `v<version>` Git tag。标签版本必须与 `apps/desktop/package.json` 完全一致。通常 tag 指向候选 commit；候选后只有发布基础设施变化且应用构建输入 SHA-256 不变时，可以复用原候选。
-7. tag 工作流不再重复构建、签名、公证或 E2E；它按应用构建输入 SHA-256 查找成功的 `target=all` 候选，并确认候选 commit 是 tag commit 的祖先。任何 App、Runtime、依赖或打包输入变化都会产生不同指纹并要求新候选。随后工作流复核 run 与候选身份凭据，下载已验证附件，校验附件白名单并发布 GitHub Release。
+3. 先推送版本提交到 `master`，再手动运行 `.github/workflows/desktop-release.yml`，选择 `target=all`。发布流程不运行测试，也不等待普通 CI；开发 CI 继续独立运行。
+4. 默认使用 `macos-15-intel`、`macos-15` 和 `windows-latest` 构建三个原生目标平台。macOS 使用 Developer ID 签名和 Apple 公证。打包完成即上传附件，保留 Web 资源哈希和包完整性校验，不执行 packaged App E2E。
+5. 可选的 `reuse_run_id` 允许复用先前 master 发布运行中成功平台的完整附件，避免重复打包。来源必须是已结束的同仓库发布运行，commit 必须是当前 master 的祖先，应用构建输入必须一致；对应平台 job 成功且 Desktop 与 KrillinAI 附件均存在、未过期才可复用。仅 E2E 测试代码和发布基础设施变化不改变应用构建输入。缺失平台正常补打，Linux 附件同样可以复用。
+6. 新生成与复用的附件汇集到当前 run，确认三平台 Desktop、三平台 KrillinAI 和 Linux 共七组附件齐全后生成候选身份凭据。身份凭据记录源码指纹、commit、仓库、run、复用来源，以及 `packaging-only` 验证范围。
+7. 完整候选成功后创建并推送新的 annotated `v<version>` tag，版本必须匹配 `apps/desktop/package.json`，注释使用已提交的英文版本说明。tag 工作流只提升候选附件，不重复打包或测试；它校验候选来源、祖先关系、源码指纹、附件白名单及校验和后发布 GitHub Release。
 
 发布阶段会按最终候选文件重新计算更新元数据和总校验清单。DMG 写入公证票据后大小和 SHA-512 会改变，不能沿用 Electron Builder 在公证前写入的 DMG 字段；ZIP/EXE 的更新校验必须与原候选完全一致。候选安装包、ZIP、blockmap、Runtime 和组件归档保持原始字节。
 
-如果发布后仅需修复元数据，可在发布基础设施修复通过 master push CI 后运行：
+如果发布后仅需修复元数据，可在发布基础设施修复进入 master 后运行：
 
 ```bash
 gh workflow run desktop-release.yml --ref master -f target=publish -f release_tag=v3.2.7
 ```
 
-该入口要求现有 tag 是 master 的祖先，tag 与当前提交的应用构建指纹完全一致，并且两个提交的 CI 均成功。它仍须校验完整候选的来源，逐一确认已发布的程序附件 SHA-256 与候选一致，最终只替换三个 latest YAML 与总校验清单；不会修改 tag 或重新构建、替换安装包。
+该入口要求现有 tag 是 master 的祖先，tag 与当前提交的应用构建指纹完全一致。它仍须校验完整候选的来源，逐一确认已发布的程序附件 SHA-256 与候选一致，最终只替换三个 latest YAML 与总校验清单；不会修改 tag 或重新构建、替换安装包。
 
 CI 变更分类始终以最近一次成功的 `master` push CI 为基线，而不是只比较直接父提交。这样，失败的产品提交后即使只修复 workflow，也必须重新执行完整 CI，不会被 release-only 快速路径掩盖。
 如果该基线对象已不在远端历史中，或不再是当前提交的祖先，分类器回退为完整 CI，不阻断分类步骤，也不将未知变更按纯发布改动处理。
@@ -73,7 +73,7 @@ CI 变更分类始终以最近一次成功的 `master` push CI 为基线，而�
 ```bash
 gh workflow run desktop-release.yml --ref master -f target=all
 # 等待候选工作流全部通过后再创建 tag
-git tag -a v3.0.0 -m "OpenCreator v3.0.0"
+git tag -a v3.0.0 -F apps/desktop/release-notes/v3.0.0.md
 git push origin v3.0.0
 ```
 

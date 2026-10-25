@@ -79,8 +79,9 @@ func TestPairedTranslationRateLimitStopsAtConfiguredLimit(t *testing.T) {
 		calls++
 		return "", &openaiapi.APIError{HTTPStatusCode: http.StatusTooManyRequests}
 	})}
-	_, err := translator.requestTranslation(context.Background(), "translation request", 1024)
-	if translationRequestStatus(err) != http.StatusTooManyRequests || calls != 1 {
+	_, err := translator.translatePairedSentences(context.Background(), []string{"Hello."}, "en", "zh_cn", 50, 1, nil)
+	var exhausted *allTranslationFailedError
+	if !errors.As(err, &exhausted) || exhausted.count != 1 || !strings.Contains(exhausted.reason, "429") || calls != 1 {
 		t.Fatalf("限流达到配置次数后没有退出: calls=%d error=%v", calls, err)
 	}
 }
@@ -265,7 +266,7 @@ func TestPairedTranslationProgressDoesNotWaitForSlowEarlierBatch(t *testing.T) {
 	}
 }
 
-func TestPairedTranslationKeepsSuccessfulWindowsWhenOneFails(t *testing.T) {
+func TestPairedTranslationPreservesFailedSentenceAndCommitsOtherWindows(t *testing.T) {
 	previous := config.Conf
 	t.Cleanup(func() { config.Conf = previous })
 	config.Conf.App.TranslateParallelNum = 2
@@ -289,18 +290,22 @@ func TestPairedTranslationKeepsSuccessfulWindowsWhenOneFails(t *testing.T) {
 	commits := 0
 	result, err := translator.translatePairedSentences(context.Background(), []string{"One.", "Two.", "Three."}, "en", "zh_cn", 20, 1, func([]pairedSentence, int, int) error { commits++; return nil })
 	if err != nil || len(result) != 3 || calls["1"] != 1 || calls["2"] != 1 || calls["3"] != 1 || commits != 3 {
-		t.Fatalf("calls=%v commits=%d error=%v", calls, commits, err)
+		t.Fatalf("calls=%v commits=%d result=%+v error=%v", calls, commits, result, err)
 	}
 	for i, sentence := range result {
-		if sentence.ID != fmt.Sprint(i+1) || (sentence.TranslationFallbackReason != "") != (i == 1) {
-			t.Fatalf("成功句或失败标记丢失：%+v", result)
+		if sentence.ID != fmt.Sprint(i+1) || sentence.FullSource != []string{"One.", "Two.", "Three."}[i] {
+			t.Fatalf("lost or reordered sentence: %+v", sentence)
+		}
+		if i == 1 {
+			if sentence.FullTarget != "Two." || !strings.Contains(sentence.TranslationFallbackReason, "LLM disconnected") {
+				t.Fatalf("missing original or failure reason: %+v", sentence)
+			}
+		} else if sentence.FullTarget != "这是测试译文，" || sentence.TranslationFallbackReason != "" {
+			t.Fatalf("successful translation was discarded: %+v", sentence)
 		}
 	}
-	if result[1].FullTarget != "Two." || !strings.Contains(result[1].TranslationFallbackReason, "LLM disconnected") {
-		t.Fatalf("失败句未保留原文及原因：%+v", result[1])
-	}
 	if failures := task.TranslationFailures(); len(failures) != 1 || failures[0].SentenceID != "2" {
-		t.Fatalf("失败报告错误：%+v", failures)
+		t.Fatalf("failure report was lost: %+v", failures)
 	}
 }
 
@@ -948,7 +953,6 @@ func TestAudioTranslationWorkerStopsOnUpstreamFailure(t *testing.T) {
 			if failure {
 				want = 1
 			}
-			// 源文单元通过本地 NLP 整理，不再请求模型预分句。
 			if calls != want || splitCalls != 0 || (err != nil) != failure {
 				t.Fatalf("translation calls=%d want=%d split calls=%d error=%v", calls, want, splitCalls, err)
 			}
@@ -1012,5 +1016,20 @@ func TestAudioModalFilterPreservesPairedSource(t *testing.T) {
 	items, err := svc.splitTextAndTranslateV2(context.Background(), "", "Um, no, I might come.", "en", "zh_cn", true, 0, nil)
 	if err != nil || calls != 1 || len(items) != 1 || items[0].OriginText != "Um, no, I might come." {
 		t.Fatalf("items=%+v calls=%d error=%v", items, calls, err)
+	}
+}
+
+func TestPairedTranslationRequestRateLimitStopsAtConfiguredLimit(t *testing.T) {
+	previous := config.Conf
+	t.Cleanup(func() { config.Conf = previous })
+	config.Conf.App.TranslateMaxAttempts = 1
+	calls := 0
+	translator := &Translator{chatCompleter: translationCompleterFunc(func(string) (string, error) {
+		calls++
+		return "", &openaiapi.APIError{HTTPStatusCode: http.StatusTooManyRequests}
+	})}
+	_, err := translator.requestTranslation(context.Background(), "translation request", 1024)
+	if translationRequestStatus(err) != http.StatusTooManyRequests || calls != 1 {
+		t.Fatalf("限流达到配置次数后没有退出: calls=%d error=%v", calls, err)
 	}
 }

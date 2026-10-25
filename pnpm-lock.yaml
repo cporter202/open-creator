@@ -29,6 +29,11 @@ overrides:
   zod@<4.6.6: 4.6.6
   body-parser@>=2.0.0 <2.4.0: 2.4.0
 
+patchedDependencies:
+  jassub@2.5.23:
+    hash: pu5g7l2qezzc5fm65k5xnaanqq
+    path: patches/jassub@2.5.23.patch
+
 importers:
 
   .:
@@ -253,7 +258,7 @@ importers:
         version: 7.5.0
       jassub:
         specifier: 2.5.23
-        version: 2.5.23
+        version: 2.5.23(patch_hash=pu5g7l2qezzc5fm65k5xnaanqq)
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
@@ -7087,7 +7092,7 @@ snapshots:
       filelist: 1.0.6
       picocolors: 1.1.1
 
-  jassub@2.5.23:
+  jassub@2.5.23(patch_hash=pu5g7l2qezzc5fm65k5xnaanqq):
     dependencies:
       abslink: 1.3.1
       lfa-ponyfill: 1.1.1

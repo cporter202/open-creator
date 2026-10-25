@@ -32,7 +32,16 @@ export function installCreatorNlpDependencies({ vendorRoot, platform, arch, offl
       const args = ['--fail', '--silent', '--show-error', '--location', '--retry', '3', '--connect-timeout', '20', '--max-time', '180'];
       if (proxy) args.push('--proxy', proxy);
       args.push('--output', temporary, wheel.url);
-      run('curl', args, { stdio: 'inherit' });
+      try {
+        run('curl', args, { stdio: 'inherit' });
+      } catch (error) {
+        // curl's internal retries cannot recover when the Windows process crashes.
+        const gitCurl = join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'mingw64', 'bin', 'curl.exe');
+        if (process.platform !== 'win32' || (error?.status >>> 0) !== 0xc0000005 || !existsSync(gitCurl)) throw error;
+        rmSync(temporary, { force: true });
+        console.warn('[creator-nlp] curl crashed with 0xC0000005; retrying with Git for Windows curl');
+        run(gitCurl, args, { stdio: 'inherit', windowsHide: true });
+      }
       if (hashFile(temporary) !== wheel.sha256) throw new Error(`spaCy wheel SHA-256 mismatch: ${wheel.fileName}`);
       rmSync(path, { force: true });
       renameSync(temporary, path);

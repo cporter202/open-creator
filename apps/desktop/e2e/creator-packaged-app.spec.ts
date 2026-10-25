@@ -44,6 +44,43 @@ async function selectChoice(control: Locator, value: string) {
   await control.page().getByRole('option').and(control.page().locator(`[data-value="${value}"]`)).click();
 }
 
+test('@package-smoke 内嵌翻译运行时可用，组件页显示 yt-dlp', async ({}, testInfo) => {
+  const fixture = await launchCreatorDesktop();
+  try {
+    await waitForWorkspace(fixture.app.page);
+    const status = await runtimeRequest<{ ytDlp: { source: string; currentVersion: string } }>(
+      fixture.app.page, 'GET', '/creator/yt-dlp/status');
+    expect(status.status, JSON.stringify(status.body)).toBe(200);
+    expect(status.body.ytDlp.source).toBe('bundled');
+
+    const projects = await runtimeRequest<{ projects: Array<{ id: string }> }>(
+      fixture.app.page, 'GET', '/projects?status=all');
+    const created = await runtimeRequest<{ job: { id: string } }>(
+      fixture.app.page, 'POST', '/creator/jobs', {
+        projectId: projects.body.projects[0]!.id, templateId: 'video-translation',
+        creationKey: 'packaged-runtime-preflight',
+        state: { sourceType: 'url', sourceUrl: 'https://www.youtube.com/watch?v=QaBOfzyj0tI',
+          sourceLanguage: 'en', targetLanguage: 'zh_cn', preferPlatformCaptions: true }
+      });
+    expect(created.status).toBe(201);
+    const preflight = await runtimeRequest<{ ready: Array<{ id: string }>; blocked: Array<{ id: string }> }>(
+      fixture.app.page, 'GET', `/creator/jobs/${created.body.job.id}/preflight?stageId=subtitle`);
+    expect(preflight.status, JSON.stringify(preflight.body)).toBe(200);
+    expect(preflight.body.ready.map(check => check.id)).toEqual(
+      expect.arrayContaining(['executor', 'ffmpeg', 'ffprobe', 'yt-dlp', 'krillin-runtime']));
+    expect(preflight.body.blocked.filter(check =>
+      ['executor', 'ffmpeg', 'ffprobe', 'yt-dlp', 'krillin-runtime'].includes(check.id))).toEqual([]);
+
+    await fixture.app.page.evaluate(() => { window.location.hash = '#/settings?tab=local-components'; });
+    await expect(fixture.app.page.getByRole('heading', { name: 'yt-dlp nightly' })).toBeVisible();
+    await expect(fixture.app.page.getByText(status.body.ytDlp.currentVersion, { exact: true }).first()).toBeVisible();
+    await fixture.app.page.screenshot({ path: testInfo.outputPath('runtime-components.png') });
+  } finally {
+    await closePackagedApp(fixture.app);
+    rmSync(fixture.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
 test('Remotion 组件不随 App 内嵌，首次渲染按需下载后自动继续，更新不重复下载', async () => {
   test.setTimeout(180_000);
   const release = JSON.parse(readFileSync(join(desktopDir, '.pack', 'components', 'remotion-component.json'), 'utf8'));

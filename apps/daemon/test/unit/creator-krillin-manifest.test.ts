@@ -22,6 +22,34 @@ afterEach(() => {
 });
 
 describe('Krillin Runtime 清单校验', () => {
+  it.each([false, true])('accepts build provenance from a packaged runtime (signed: %s)', signed => {
+    const fixture = createFixture();
+    const path = join(fixture.root, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(path, 'utf8'));
+    const cliSha256 = manifest.resources[0].sha256;
+    manifest.krillinBuild = { buildRecipeSha256: 'a'.repeat(64), cliSha256 };
+    if (signed) manifest.cliSigning = { unsignedSha256: 'b'.repeat(64), signedSha256: cliSha256 };
+    writeFileSync(path, JSON.stringify(manifest));
+
+    const parsed = readKrillinRuntimeManifest(fixture.root);
+    expect(parsed.krillinBuild).toEqual(manifest.krillinBuild);
+    expect(parsed.cliSigning).toEqual(manifest.cliSigning);
+    expect(verifyKrillinRuntimeManifest(fixture.root, parsed)).toEqual({ cacheHit: false });
+    writeFileSync(fixture.executable, 'tampered-runtime');
+    expect(() => verifyKrillinRuntimeManifest(fixture.root, parsed)).toThrow('dependency_hash_mismatch');
+  });
+
+  it.each([
+    { krillinBuild: { buildRecipeSha256: 'invalid', cliSha256: 'a'.repeat(64) } },
+    { cliSigning: { unsignedSha256: 'a'.repeat(64), signedSha256: 'invalid' } },
+    { unknownMetadata: true }
+  ])('rejects malformed or unknown manifest metadata (%j)', metadata => {
+    const fixture = createFixture();
+    const path = join(fixture.root, 'manifest.json');
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), ...metadata }));
+    expect(() => readKrillinRuntimeManifest(fixture.root)).toThrow();
+  });
+
   it('缓存完整校验结果，并在资源变化时拒绝缓存', () => {
     const fixture = createFixture();
     const manifest = readKrillinRuntimeManifest(fixture.root);

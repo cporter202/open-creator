@@ -10,7 +10,6 @@ import (
 	"krillin-ai/pkg/util"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -355,15 +354,33 @@ func TestSplitTextAndTranslateUsesBatchesAndReportsProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sort.Ints(completer.batchSizes)
-	if fmt.Sprint(completer.batchSizes) != "[3 10]" {
-		t.Fatalf("batch sizes = %v, want [3 10]", completer.batchSizes)
+	total := 0
+	for _, size := range completer.batchSizes {
+		if size <= 0 || size > 10 {
+			t.Fatalf("batch exceeds the semantic translation limit: %v", completer.batchSizes)
+		}
+		total += size
 	}
-	if len(progress) != 2 || progress[0] <= 0 || progress[0] >= 13 || progress[1] != 13 {
-		t.Fatalf("progress = %v, want two advancing updates ending at 13", progress)
+	if total != len(parts) {
+		t.Fatalf("batch coverage = %d, want %d", total, len(parts))
 	}
-	if len(results) != 13 || results[12].TranslatedText == results[12].OriginText {
+	last := 0
+	for _, completed := range progress {
+		if completed <= last || completed > len(parts) {
+			t.Fatalf("progress is not increasing: %v", progress)
+		}
+		last = completed
+	}
+	if len(progress) != len(completer.batchSizes) || last != len(parts) {
+		t.Fatalf("incomplete progress: %v", progress)
+	}
+	if len(results) != len(parts) {
 		t.Fatalf("unexpected results: %+v", results)
+	}
+	for i, result := range results {
+		if result.OriginText != parts[i] || result.TranslatedText == result.OriginText || result.TranslatedText == "" {
+			t.Fatalf("sentence lost, reordered or untranslated: %+v", result)
+		}
 	}
 }
 

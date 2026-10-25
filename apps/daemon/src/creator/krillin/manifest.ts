@@ -63,6 +63,14 @@ const manifestSchema = z.object({
   cliVersion: z.string().min(1).optional(),
   sourceCommit: z.string().min(1).optional(),
   sourceSha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+  krillinBuild: z.object({
+    buildRecipeSha256: z.string().regex(/^[a-f0-9]{64}$/i),
+    cliSha256: z.string().regex(/^[a-f0-9]{64}$/i)
+  }).strict().optional(),
+  cliSigning: z.object({
+    unsignedSha256: z.string().regex(/^[a-f0-9]{64}$/i),
+    signedSha256: z.string().regex(/^[a-f0-9]{64}$/i)
+  }).strict().optional(),
   integrationPatchSha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
   platform: z.string().min(1),
   arch: z.string().min(1),

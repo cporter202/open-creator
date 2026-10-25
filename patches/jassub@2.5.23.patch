@@ -1,0 +1,51 @@
+diff --git a/dist/worker/renderers/2d-renderer.js b/dist/worker/renderers/2d-renderer.js
+index f9847300caede866155a177bb1e122430a4ef1ab..b341dd619d156f756ee9b4bf2d73e856391ac3ad 100644
+--- a/dist/worker/renderers/2d-renderer.js
++++ b/dist/worker/renderers/2d-renderer.js
+@@ -8,7 +8,7 @@ export class Canvas2DRenderer extends CanvasRendererBase {
+     bufferCanvas = new OffscreenCanvas(1, 1);
+     bufferCtx = this.bufferCanvas.getContext('2d', {
+         alpha: true,
+-        desynchronized: true,
++        desynchronized: false,
+         willReadFrequently: false
+     });
+     colorMatrix = IDENTITY_MATRIX;
+@@ -16,7 +16,8 @@ export class Canvas2DRenderer extends CanvasRendererBase {
+         super(canvas);
+         this.ctx = canvas.getContext('2d', {
+             alpha: true,
+-            desynchronized: true,
++            // 回退渲染器同样需要保留透明字幕与视频的正常合成顺序。
++            desynchronized: false,
+             willReadFrequently: false
+         });
+         if (!this.ctx || !this.bufferCtx)
+diff --git a/dist/worker/renderers/webgl1-renderer.js b/dist/worker/renderers/webgl1-renderer.js
+index 795395cbb99cf5722249454dc7b14234f9d43a9f..09d9eed791702780bc95237532c6b2ffbec61a7e 100644
+--- a/dist/worker/renderers/webgl1-renderer.js
++++ b/dist/worker/renderers/webgl1-renderer.js
+@@ -105,7 +105,8 @@ export class WebGL1Renderer extends WebGLRendererBase {
+             depth: false,
+             preserveDrawingBuffer: false,
+             stencil: false,
+-            desynchronized: true,
++            // 透明字幕必须参与页面合成，低延迟直出会在 Windows 工作台中遮黑视频。
++            desynchronized: false,
+             powerPreference: 'default'
+         });
+         if (!gl) {
+diff --git a/dist/worker/renderers/webgl2-renderer.js b/dist/worker/renderers/webgl2-renderer.js
+index 0d9bf991f65b42971dc9bb300fb820667a4485ae..91920cdc95e1b9f13bace33c8a8eb698a2342ffb 100644
+--- a/dist/worker/renderers/webgl2-renderer.js
++++ b/dist/worker/renderers/webgl2-renderer.js
+@@ -133,7 +133,8 @@ export class WebGL2Renderer extends WebGLRendererBase {
+             depth: false,
+             preserveDrawingBuffer: false,
+             stencil: false,
+-            desynchronized: true,
++            // 透明字幕必须参与页面合成，低延迟直出会在 Windows 工作台中遮黑视频。
++            desynchronized: false,
+             powerPreference: 'default'
+         });
+         if (!gl) {

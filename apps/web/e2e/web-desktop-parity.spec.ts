@@ -4,8 +4,9 @@ import { test, expect, stubVideoDownloadProbe } from './fixtures/runtime.js';
 
 async function selectChoice(control: Locator, value: string) {
   await control.click();
-  await control.page().getByRole('option')
-    .and(control.page().locator(`[data-value="${value}"]`)).click();
+  const listId = await control.getAttribute('aria-controls');
+  expect(listId).toBeTruthy();
+  await control.page().locator(`[id="${listId}"]`).locator(`[role="option"][data-value="${value}"]`).click();
 }
 
 test('视频翻译语言检索和选项在 Browser/Desktop 使用相同目录', async ({ browser, runtime }, testInfo) => {
@@ -1418,7 +1419,7 @@ test('视频生成在 Browser/Desktop Bridge 下保持相同界面、请求和�
       state: {
         prompt: '雨夜中的未来城市，镜头平稳向前推进',
         provider: 'seedance',
-        model: 'doubao-seedance-2-0-260128',
+        model: 'doubao-seedance-2-5-260628',
         size: '1280x720',
         duration: 5,
         currentStep: 1,
@@ -1458,7 +1459,7 @@ test('视频生成在 Browser/Desktop Bridge 下保持相同界面、请求和�
       const format = workspace.getByRole('combobox', { name: '画幅' });
       const duration = workspace.getByRole('combobox', { name: '视频时长' });
       await expect(provider).toHaveAttribute('data-value', 'seedance');
-      await expect(model).toHaveValue('Seedance 2.0');
+      await expect(model).toHaveValue('Seedance 2.5');
       await expect(format).toHaveAttribute('data-value', '1280x720');
       await expect(duration).toHaveAttribute('data-value', '5');
       await selectChoice(provider, 'veo');
