@@ -28,13 +28,13 @@ func main() {
 		fmt.Print(cli.Help(cmd))
 		return
 	}
-	if cmd.Name == "compile-subtitles" {
-		writeAndExit(output, cli.Execute(context.Background(), nil, cmd))
-		return
-	}
 	if cmd.Name == "voices" {
 		_ = config.LoadConfig()
 		_ = config.CheckBaseConfig()
+		writeAndExit(output, cli.Execute(context.Background(), nil, cmd))
+		return
+	}
+	if cmd.Name == "compile-subtitles" {
 		writeAndExit(output, cli.Execute(context.Background(), nil, cmd))
 		return
 	}

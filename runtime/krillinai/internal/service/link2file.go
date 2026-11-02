@@ -66,8 +66,8 @@ func (s Service) linkToFile(ctx context.Context, stepParam *types.SubtitleTaskSt
 				"-o", audioPath,
 				stepParam.Link,
 			}
-			if config.Conf.App.Proxy != "" {
-				cmdArgs = append(cmdArgs, "--proxy", config.Conf.App.Proxy)
+			if proxy := config.YouTubeProxy(); proxy != "" {
+				cmdArgs = append(cmdArgs, "--proxy", proxy)
 			}
 			cmdArgs = appendCookiesArgs(cmdArgs, youtubeCookiesPath)
 			if storage.FfmpegPath != "ffmpeg" {
@@ -118,10 +118,7 @@ func (s Service) linkToFile(ctx context.Context, stepParam *types.SubtitleTaskSt
 		log.GetLogger().Info("linkToFile.unsupported link type", zap.Any("step param", stepParam))
 		return errors.New("linkToFile error: unsupported public video source")
 	}
-	// 音频提取的真实进度可能已超过 6%，保留已报告的较高进度。
-	if stepParam.TaskPtr.ProcessPct < 6 {
-		stepParam.TaskPtr.SetProgress(6)
-	}
+	stepParam.TaskPtr.SetProgress(6)
 	if !stepParam.SkipAudio {
 		stepParam.AudioFilePath = audioPath
 	}

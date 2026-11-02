@@ -8,7 +8,7 @@ import (
 	"io"
 	"krillin-ai/config"
 	"krillin-ai/internal/pipeline"
-	"krillin-ai/internal/service"
+	krillinservice "krillin-ai/internal/service"
 	subtitlestyle "krillin-ai/internal/subtitle_style"
 	"krillin-ai/internal/ttsprovider"
 	"krillin-ai/internal/types"
@@ -46,19 +46,23 @@ func defaultStyleLoadError(err error) error {
 }
 
 type Command struct {
-	Name                 string
-	Help                 bool
-	DryRun               bool
-	SubtitleStyleFile    string
-	SubtitleDocumentFile string
-	CompileOutput        string
-	Subtitle             pipeline.SubtitleRequest
-	TTS                  pipeline.TTSRequest
-	Speech               SpeechRequest
-	Render               pipeline.RenderRequest
-	Cover                pipeline.CoverRequest
-	Pipeline             pipeline.PipelineRequest
-	Voices               VoicesRequest
+	Name              string
+	Help              bool
+	DryRun            bool
+	SubtitleStyleFile string
+	Subtitle          pipeline.SubtitleRequest
+	TTS               pipeline.TTSRequest
+	Speech            SpeechRequest
+	Render            pipeline.RenderRequest
+	Compile           CompileSubtitleRequest
+	Cover             pipeline.CoverRequest
+	Pipeline          pipeline.PipelineRequest
+	Voices            VoicesRequest
+}
+
+type CompileSubtitleRequest struct {
+	Input  string
+	Output string
 }
 
 type VoicesRequest struct {
@@ -85,18 +89,6 @@ func Parse(args []string) (Command, error) {
 		return Command{Help: true}, nil
 	}
 	switch name {
-	case "compile-subtitles":
-		fs := newFlagSet(name)
-		input := fs.String("input", "", "structured subtitle document")
-		output := fs.String("output", "", "compiled ASS output")
-		style := fs.String("subtitle-style-file", "", "subtitle style JSON file")
-		if err := fs.Parse(args[1:]); err != nil {
-			return Command{}, err
-		}
-		if *input == "" || *output == "" {
-			return Command{}, errors.New("input and output are required")
-		}
-		return Command{Name: name, SubtitleDocumentFile: *input, CompileOutput: *output, SubtitleStyleFile: *style}, nil
 	case "subtitle":
 		return parseSubtitle(name, args[1:])
 	case "tts":
@@ -107,6 +99,8 @@ func Parse(args []string) (Command, error) {
 		return parseRender(name, args[1:], true)
 	case "render-vertical":
 		return parseRender(name, args[1:], false)
+	case "compile-subtitles":
+		return parseCompileSubtitles(name, args[1:])
 	case "pipeline":
 		return parsePipeline(name, args[1:])
 	case "cover":
@@ -189,6 +183,7 @@ Flags:
   --video <file>        Input video
   --audio <file>        Optional input audio
   --subtitle <file>     Subtitle file to burn in
+  --subtitle-document <file>  Structured subtitle render document JSON
   --subtitle-style-file <file>  JSON subtitle style override file
   --line-mode <mode>    target-only, bilingual-target-top, or bilingual-target-bottom
   --preview-width <px> --preview-height <px>  Render a transparent subtitle PNG
@@ -208,6 +203,7 @@ Flags:
   --video <file>        Input video
   --audio <file>        Optional input audio
   --subtitle <file>     Subtitle file to burn in
+  --subtitle-document <file>  Structured subtitle render document JSON
   --subtitle-style-file <file>  JSON subtitle style override file
   --line-mode <mode>    target-only, bilingual-target-top, or bilingual-target-bottom
   --preview-width <px> --preview-height <px>  Render a transparent subtitle PNG
@@ -218,6 +214,17 @@ Flags:
   --minor-title <text>  Vertical video minor title
   --dry-run             Validate command without external calls
   -h, --help            Show this help
+`
+	case "compile-subtitles":
+		return `Usage:
+  krillinai-cli compile-subtitles --input <document.json> --output <subtitles.ass> [flags]
+
+Flags:
+  --input <file>                  Subtitle render document JSON
+  --output <file>                 Output ASS subtitle file
+  --subtitle-style-file <file>    JSON subtitle style override file
+  --dry-run                       Validate command without external calls
+  -h, --help                      Show this help
 `
 	case "pipeline":
 		return `Usage:
@@ -266,6 +273,7 @@ Commands:
   speech               Generate audio from plain text
   render-horizontal    Render landscape subtitle or dubbed videos
   render-vertical      Render portrait subtitle or dubbed videos
+  compile-subtitles    Compile a subtitle render document to ASS
   pipeline             Plan or run multi-stage workflows when supported
   cover                Generate a cover image from a prompt
   voices               List available TTS voice codes
@@ -281,15 +289,6 @@ func Execute(ctx context.Context, svc pipeline.StageService, cmd Command) pipeli
 		return dryRun(cmd)
 	}
 	switch cmd.Name {
-	case "compile-subtitles":
-		style, err := loadSubtitleStyleForCLI(cmd.SubtitleStyleFile)
-		if err == nil {
-			err = service.CompileSubtitleDocumentFile(cmd.SubtitleDocumentFile, cmd.CompileOutput, style)
-		}
-		if err != nil {
-			return pipeline.Response{OK: false, Error: &pipeline.Error{Kind: pipeline.ErrorKindUsage, Code: "subtitle_compile_failed", Message: err.Error()}}
-		}
-		return pipeline.Response{OK: true, Stage: pipeline.Stage("compile-subtitles")}
 	case "subtitle":
 		style, err := loadSubtitleStyleForCLI(cmd.SubtitleStyleFile)
 		if err != nil {
@@ -311,6 +310,13 @@ func Execute(ctx context.Context, svc pipeline.StageService, cmd Command) pipeli
 		cmd.Render.SubtitleStyle = style
 		resp, err := pipeline.Render(ctx, svc, cmd.Render)
 		return responseWithError(resp, err)
+	case "compile-subtitles":
+		style, err := loadSubtitleStyleForCLI(cmd.SubtitleStyleFile)
+		if err != nil {
+			return styleLoadFailure(pipeline.StageRenderHorizontal, "", "", err)
+		}
+		err = krillinservice.CompileSubtitleDocument(cmd.Compile.Input, cmd.Compile.Output, style)
+		return responseWithError(pipeline.Response{OK: err == nil, Stage: pipeline.StageRenderHorizontal}, err)
 	case "cover":
 		resp, err := pipeline.GenerateCover(ctx, svc, cmd.Cover)
 		return responseWithError(resp, err)
@@ -622,7 +628,7 @@ func parseRender(name string, args []string, horizontal bool) (Command, error) {
 	mediaWorkdir := fs.String("media-workdir", "", "shared source video cache")
 	audio := fs.String("audio", "", "input audio")
 	subtitle := fs.String("subtitle", "", "subtitle")
-	documentFile := fs.String("subtitle-document", "", "structured subtitle document")
+	subtitleDocument := fs.String("subtitle-document", "", "structured subtitle render document JSON")
 	dubbed := fs.Bool("dubbed", false, "render dubbed video")
 	majorTitle := fs.String("major-title", "", "vertical major title")
 	minorTitle := fs.String("minor-title", "", "vertical minor title")
@@ -654,7 +660,7 @@ func parseRender(name string, args []string, horizontal bool) (Command, error) {
 			MediaWorkdir:        *mediaWorkdir,
 			Audio:               *audio,
 			Subtitle:            *subtitle,
-			DocumentFile:        *documentFile,
+			SubtitleDocument:    *subtitleDocument,
 			Horizontal:          horizontal,
 			Dubbed:              *dubbed,
 			MajorTitle:          *majorTitle,
@@ -664,6 +670,35 @@ func parseRender(name string, args []string, horizontal bool) (Command, error) {
 			PreviewHeight:       *previewHeight,
 			MixedTargetSubtitle: *mixedTargetSubtitle,
 			TargetOnly:          *targetOnly,
+		},
+	}, nil
+}
+
+func parseCompileSubtitles(name string, args []string) (Command, error) {
+	if hasHelpArg(args) {
+		return Command{Name: name, Help: true}, nil
+	}
+	fs := newFlagSet(name)
+	input := fs.String("input", "", "subtitle render document JSON")
+	output := fs.String("output", "", "output ASS subtitle file")
+	subtitleStyleFile := fs.String("subtitle-style-file", "", "subtitle style JSON file")
+	dryRun := fs.Bool("dry-run", false, "validate command without running external services")
+	if err := fs.Parse(args); err != nil {
+		return Command{}, err
+	}
+	if fs.NArg() != 0 {
+		return Command{}, errors.New("compile-subtitles does not accept positional arguments")
+	}
+	if strings.TrimSpace(*input) == "" || strings.TrimSpace(*output) == "" {
+		return Command{}, errors.New("compile-subtitles requires --input and --output")
+	}
+	return Command{
+		Name:              name,
+		DryRun:            *dryRun,
+		SubtitleStyleFile: *subtitleStyleFile,
+		Compile: CompileSubtitleRequest{
+			Input:  *input,
+			Output: *output,
 		},
 	}, nil
 }
@@ -722,6 +757,11 @@ func dryRun(cmd Command) pipeline.Response {
 			return styleLoadFailure(pipeline.StageRenderVertical, cmd.Render.Workdir, cmd.Render.TaskID, err)
 		}
 		return dryRunResponse(pipeline.StageRenderVertical, cmd.Render.Workdir, cmd.Render.TaskID)
+	case "compile-subtitles":
+		if _, err := loadSubtitleStyleForCLI(cmd.SubtitleStyleFile); err != nil {
+			return styleLoadFailure(pipeline.StageRenderHorizontal, "", "", err)
+		}
+		return dryRunResponse(pipeline.StageRenderHorizontal, "", "")
 	case "cover":
 		return dryRunManifest(cmd.Cover.Workdir, cmd.Cover.TaskID, pipeline.StageCover, func(m *pipeline.Manifest) {
 			m.Outputs.FinalCoverPrompt = m.Outputs.FinalCoverPrompt

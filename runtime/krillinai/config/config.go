@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"krillin-ai/log"
-	pkgimage "krillin-ai/pkg/image"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,12 +22,13 @@ type App struct {
 	TranslateParallelNum  int      `toml:"translate_parallel_num"`
 	TranscribeMaxAttempts int      `toml:"transcribe_max_attempts"`
 	TranslateMaxAttempts  int      `toml:"translate_max_attempts"`
-	MaxSentenceLength     int      `toml:"max_sentence_length"` // 音频/VTT每条每种语言的显示硬上限；宽字素簇计2，其余基础字素簇计1
+	MaxSentenceLength     int      `toml:"max_sentence_length"` // 原译每行字符目标；60时验收至65，其他值为硬上限；包含空格和标点
 	EnableBlockVttBatch   bool     `toml:"enable_block_vtt_batch"`
 	VttBatchSize          int      `toml:"vtt_batch_size"`
 	TargetLanguageFirst   bool     `toml:"target_language_first"`    // 双语字幕中目标语言是否在上
 	ShortSubtitleMaxChars int      `toml:"short_subtitle_max_chars"` // 短字幕原文按词分组的字符长度，独立于普通字幕的目标语言长度
 	Proxy                 string   `toml:"proxy"`
+	YouTubeProxy          string   `toml:"youtube_proxy"`
 	ParsedProxy           *url.URL `toml:"-"`
 }
 
@@ -41,7 +41,7 @@ type OpenaiCompatibleConfig struct {
 	BaseUrl       string `toml:"base_url"`
 	ApiKey        string `toml:"api_key"`
 	Model         string `toml:"model"`
-	ModelName     string `toml:"model_name"` // 网关公开模型的真实名称，仅用于选择兼容参数，不替换路由ID。
+	ModelName     string `toml:"model_name"`
 	OfficialModel string `toml:"official_model"`
 }
 
@@ -148,14 +148,13 @@ type OpenAiWhisper struct {
 }
 
 type Config struct {
-	App         App                    `toml:"app"`
-	Server      Server                 `toml:"server"`
-	Llm         OpenaiCompatibleConfig `toml:"llm"`
-	LlmFallback OpenaiCompatibleConfig `toml:"llm_fallback"`
-	Transcribe  Transcribe             `toml:"transcribe"`
-	Tts         Tts                    `toml:"tts"`
-	Dubbing     Dubbing                `toml:"dubbing"`
-	Image       Image                  `toml:"image"`
+	App        App                    `toml:"app"`
+	Server     Server                 `toml:"server"`
+	Llm        OpenaiCompatibleConfig `toml:"llm"`
+	Transcribe Transcribe             `toml:"transcribe"`
+	Tts        Tts                    `toml:"tts"`
+	Dubbing    Dubbing                `toml:"dubbing"`
+	Image      Image                  `toml:"image"`
 }
 
 var Conf = Config{
@@ -230,7 +229,7 @@ var Conf = Config{
 	Image: Image{
 		Provider: "openai-compatible",
 		Openai: OpenaiCompatibleConfig{
-			Model: "gpt-image-2",
+			Model: "gpt-image-1",
 		},
 	},
 }
@@ -324,7 +323,6 @@ func LoadConfig() bool {
 			log.GetLogger().Error("加载配置文件失败", zap.Error(err))
 			return false
 		}
-		Conf.Image.Openai.Model = pkgimage.MigrateOpenAIImageModel(Conf.Image.Openai.Model)
 		return true
 	}
 }
@@ -343,26 +341,16 @@ func CheckConfig() error {
 func CheckBaseConfig() error {
 	var err error
 	Conf.App.ParsedProxy, err = url.Parse(Conf.App.Proxy)
-	if err != nil {
-		return err
-	}
-	return ValidateLLMFallbackConfig()
+	return err
 }
 
-// 备用源为空时保持单源行为；配置不完整时阻止启动，避免故障时才发现无法切换。
-func ValidateLLMFallbackConfig() error {
-	fallback := Conf.LlmFallback
-	if fallback.BaseUrl == "" && fallback.ApiKey == "" && fallback.Model == "" {
-		return nil
+// YouTubeProxy returns the dedicated media proxy when provided. Older
+// standalone KrillinAI configs only have app.proxy, so retain that fallback.
+func YouTubeProxy() string {
+	if proxy := strings.TrimSpace(Conf.App.YouTubeProxy); proxy != "" {
+		return proxy
 	}
-	if strings.TrimSpace(fallback.BaseUrl) == "" || strings.TrimSpace(fallback.ApiKey) == "" || strings.TrimSpace(fallback.Model) == "" {
-		return errors.New("备用 LLM 需要完整配置 base_url、api_key 和 model")
-	}
-	endpoint, err := url.Parse(fallback.BaseUrl)
-	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-		return errors.New("备用 LLM base_url 必须是有效的 HTTP/HTTPS 接口地址")
-	}
-	return nil
+	return strings.TrimSpace(Conf.App.Proxy)
 }
 
 // SaveConfig 保存配置到文件

@@ -19,7 +19,7 @@ type RenderRequest struct {
 	ReportProgress      ProgressReporter
 	Audio               string
 	Subtitle            string
-	DocumentFile        string
+	SubtitleDocument    string
 	Horizontal          bool
 	Dubbed              bool
 	MajorTitle          string
@@ -65,15 +65,12 @@ func Render(ctx context.Context, svc StageService, req RenderRequest) (Response,
 		VerticalVideoMajorTitle: req.MajorTitle,
 		VerticalVideoMinorTitle: req.MinorTitle,
 		SubtitleStyle:           req.SubtitleStyle,
-		RenderLineMode:          string(req.LineMode),
 		SubtitleResultType:      types.SubtitleResultTypeBilingualTranslationOnTop,
 	}
 	if req.LineMode == LineModeBilingualTargetBottom {
 		stepParam.SubtitleResultType = types.SubtitleResultTypeBilingualTranslationOnBottom
 	}
-	if req.DocumentFile != "" {
-		// Structured editor cues already carry explicit language roles.
-	} else if req.MixedTargetSubtitle != "" {
+	if req.MixedTargetSubtitle != "" {
 		normalized := filepath.Join(req.Workdir, "render_subtitles.srt")
 		err = normalizeMixedRenderSRT(subtitle, req.MixedTargetSubtitle, normalized, req.LineMode, req.TargetOnly)
 		if err != nil {
@@ -89,16 +86,16 @@ func Render(ctx context.Context, svc StageService, req RenderRequest) (Response,
 	}
 	forwardTaskProgress(stepParam.TaskPtr, req.ReportProgress, nil)
 	rendered, err := svc.RenderVideo(ctx, service.RenderVideoRequest{
-		Workdir:       req.Workdir,
-		InputVideo:    inputVideo,
-		AudioFile:     req.Audio,
-		SubtitleFile:  subtitle,
-		DocumentFile:  req.DocumentFile,
-		OutputFile:    output,
-		Horizontal:    req.Horizontal,
-		StepParam:     stepParam,
-		PreviewWidth:  req.PreviewWidth,
-		PreviewHeight: req.PreviewHeight,
+		Workdir:          req.Workdir,
+		InputVideo:       inputVideo,
+		AudioFile:        req.Audio,
+		SubtitleFile:     subtitle,
+		SubtitleDocument: req.SubtitleDocument,
+		OutputFile:       output,
+		Horizontal:       req.Horizontal,
+		StepParam:        stepParam,
+		PreviewWidth:     req.PreviewWidth,
+		PreviewHeight:    req.PreviewHeight,
 	})
 	if err != nil {
 		return failRenderStage(req, manifest, renderStage(req), "render_video_failed", err)

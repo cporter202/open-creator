@@ -38,6 +38,10 @@ export function createGatewayAccountService(input: {
   let catalogWork: Promise<void> | undefined;
   let catalogUpdatedAt = 0;
   let balance: GatewayBalanceSnapshot | null = null;
+  let rechargeSnapshot: {
+    state: 'recharged' | 'not_recharged' | 'pending' | 'unknown';
+    observedAt: string;
+  } = { state: 'unknown', observedAt: new Date().toISOString() };
   let mutation = Promise.resolve();
   let selectedModels: Record<string, string> = {};
   let manualModels: Record<string, string> = {};
@@ -91,6 +95,22 @@ export function createGatewayAccountService(input: {
   }
   function assertIdle() { if (localUses > 0 || input.hasActiveTasks()) throw new GatewayError('active_tasks', 409); }
   function assertSignedIn() { if (!credentials || state.authState !== 'signed_in') throw new GatewayError('auth_required', 401); return credentials; }
+  function sameAccount(left: GatewayCredentials, right: GatewayCredentials) {
+    return !!left.account?.id && !!right.account?.id && left.account.id === right.account.id;
+  }
+  function persistedSessionIsNewer(current: GatewayCredentials, persisted: GatewayCredentials) {
+    if (!sameAccount(current, persisted) || persisted.refreshToken === current.refreshToken) return false;
+    const currentExpiry = Date.parse(current.accessExpiresAt);
+    const persistedExpiry = Date.parse(persisted.accessExpiresAt);
+    return !Number.isFinite(currentExpiry) || !Number.isFinite(persistedExpiry) || persistedExpiry >= currentExpiry;
+  }
+  async function adoptPersistedSession(current: GatewayCredentials) {
+    const persisted = await store.readCredentials().catch(() => undefined);
+    if (!persisted || !persistedSessionIsNewer(current, persisted)) return current;
+    credentials = { ...current, ...persisted };
+    state.account = credentials.account ?? state.account;
+    return credentials;
+  }
   function usesCachedModelKey() { return credentials?.modelUsePolicy === cachedModelUsePolicy && isDirectTransport(credentials.transport) && credentials.keyRotation === false; }
   function restoreModelAccessError(code: NonNullable<GatewayCredentials['modelAccessError']>) {
     if (code === 'auth_required') state = { ...state, authState: 'expired', activationState: 'inactive', bindingVersion: null, activationError: null };
@@ -247,23 +267,30 @@ export function createGatewayAccountService(input: {
   async function refresh() {
     if (refreshWork) return refreshWork;
     refreshWork = (async () => {
-      const original = assertSignedIn(); const expected = generation;
+      let original = assertSignedIn(); const expected = generation;
       if (Date.parse(original.accessExpiresAt) > Date.now() + 60_000) return;
-      try {
-        const tokens = await input.client.refresh(original.refreshToken);
-        if (closing || accessPaused || generation !== expected || credentials?.refreshToken !== original.refreshToken || state.authState !== 'signed_in') return;
-        // 同一登录会话内只更新令牌，保留并发同步的模型凭据。
-        credentials = { ...assertSignedIn(), ...tokens, accessExpiresAt: new Date(Date.now() + tokens.expiresIn * 1000).toISOString() };
-        await store.writeCredentials(credentials);
-      } catch (error) {
-        if (await blockConfirmedModelAccess(error, expected, original.account?.id)) throw error;
-        if (!closing && !accessPaused && error instanceof GatewayError && error.status === 401 && generation === expected && credentials?.refreshToken === original.refreshToken && state.authState === 'signed_in') {
-          state = { ...state, authState: 'expired', activationState: 'inactive', bindingVersion: null, activationError: null };
-          runtimeTextModel = undefined; accessController?.abort();
-          clearInterval(usageTimer); usageTimer = undefined;
-          await input.closeRuntime();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const tokens = await input.client.refresh(original.refreshToken);
+          if (closing || accessPaused || generation !== expected || credentials?.refreshToken !== original.refreshToken || state.authState !== 'signed_in') return;
+          // 同一登录会话内只更新令牌，保留并发同步的模型凭据。
+          credentials = { ...assertSignedIn(), ...tokens, accessExpiresAt: new Date(Date.now() + tokens.expiresIn * 1000).toISOString() };
+          await store.writeCredentials(credentials);
+          return;
+        } catch (error) {
+          if (await blockConfirmedModelAccess(error, expected, original.account?.id)) throw error;
+          if (error instanceof GatewayError && error.status === 401 && attempt === 0) {
+            const latest = await adoptPersistedSession(original);
+            if (latest.refreshToken !== original.refreshToken) { original = latest; continue; }
+          }
+          if (!closing && !accessPaused && error instanceof GatewayError && error.status === 401 && generation === expected && credentials?.refreshToken === original.refreshToken && state.authState === 'signed_in') {
+            state = { ...state, authState: 'expired', activationState: 'inactive', bindingVersion: null, activationError: null };
+            runtimeTextModel = undefined; accessController?.abort();
+            clearInterval(usageTimer); usageTimer = undefined;
+            await input.closeRuntime();
+          }
+          throw error;
         }
-        throw error;
       }
     })();
     try { await refreshWork; } finally { refreshWork = undefined; }
@@ -710,10 +737,22 @@ export function createGatewayAccountService(input: {
       if (credentials) await input.client.logout(credentials.accessToken).catch(() => undefined);
       await store.deleteCredentials(); state.source = 'manual'; state.bindingVersion = null; await saveConfiguration();
       credentials = undefined; pendingGatewayCatalog = undefined; balance = null; profileUpdatedAt = 0; catalogUpdatedAt = 0; accessUpdatedAt = 0; modelAuthRecoveryAt = 0; accessBlocked = false; supplierMigrating = false;
+      rechargeSnapshot = { state: 'unknown', observedAt: new Date().toISOString() };
       state = { ...state, authState: 'signed_out', activationState: 'inactive', account: null, models: [], bindingVersion: null, activationError: null, supplier: undefined };
     }).finally(() => { accessPaused = false; });
   }
-  async function billing(path: string, body?: unknown) { await initialize(); await refresh(); const current = assertSignedIn(); return withAccountAccess(() => input.client.request(path, current.accessToken, body)); }
+  async function billing(path: string, body?: unknown) {
+    await initialize();
+    await refresh();
+    const current = assertSignedIn();
+    const response = await withAccountAccess(() => input.client.request(path, current.accessToken, body));
+    const rechargeState = rechargeStateFromOrderResponse(response);
+    if (rechargeState !== undefined
+      && (rechargeSnapshot.state !== 'recharged' || rechargeState === 'recharged')) {
+      rechargeSnapshot = { state: rechargeState, observedAt: new Date().toISOString() };
+    }
+    return response;
+  }
   async function readBalance(): Promise<GatewayBalanceState> {
     try {
       const value = z.object({ balance: z.object({ availableUnits: z.string().regex(/^\d+$/), reservedUnits: z.string().regex(/^\d+$/), periodEnd: z.string().nullable(), asOf: z.string() }) }).parse(await billing('/api/v1/billing/summary'));
@@ -723,6 +762,7 @@ export function createGatewayAccountService(input: {
   return {
     initialize, startBackgroundRestore,
     peekState: snapshotState,
+    peekTelemetryRechargeState: () => rechargeSnapshot,
     startAuthorization, cancelAuthorization, pollAuthorization, checkAuthorization, refresh, logout, modelCredentials, beginModelUse, recoverModelCredentials, validateModel, probeModel, readBalance, billing, reportModelFailure, reportModelSuccess,
     async setRegion(next: SupplierRegion) {
       await initialize();
@@ -808,4 +848,32 @@ export function createGatewayAccountService(input: {
     }
   };
 }
+
+function rechargeStateFromOrderResponse(value: unknown): 'recharged' | 'not_recharged' | 'pending' | 'unknown' | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const orders = Array.isArray(record.items)
+    ? record.items
+    : record.order !== null && typeof record.order === 'object' && !Array.isArray(record.order)
+      ? [record.order]
+      : undefined;
+  if (orders === undefined) return undefined;
+  const states = orders.flatMap(order => {
+    if (order === null || typeof order !== 'object' || Array.isArray(order)) return [];
+    const candidate = order as Record<string, unknown>;
+    const status = typeof candidate.status === 'string' ? candidate.status : '';
+    const paymentStatus = typeof candidate.paymentStatus === 'string' ? candidate.paymentStatus : '';
+    const creditStatus = typeof candidate.creditStatus === 'string' ? candidate.creditStatus : '';
+    if (status === 'completed' || creditStatus === 'ready' || creditStatus === 'completed') return ['recharged' as const];
+    if (status === 'pending' || status === 'processing' || paymentStatus === 'pending' || creditStatus === 'pending') return ['pending' as const];
+    if (['failed', 'canceled', 'cancelled', 'expired', 'refunded'].includes(status)) return ['not_recharged' as const];
+    return ['unknown' as const];
+  });
+  if (states.includes('recharged')) return 'recharged';
+  if (states.includes('pending')) return 'pending';
+  if (states.includes('unknown')) return 'unknown';
+  if (orders.length === 0) return 'not_recharged';
+  return states.length === 0 ? 'unknown' : 'not_recharged';
+}
+
 export type GatewayAccountService = ReturnType<typeof createGatewayAccountService>;

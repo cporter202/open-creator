@@ -47,7 +47,6 @@ import type {
 
 registerPrivilegedSchemes();
 app.setName('OpenCreator');
-app.commandLine.appendSwitch('lang', 'zh-CN');
 const APP_ENTRY_AT = Date.now();
 const DEVELOPMENT =
   process.env.OPENCREATOR_DESKTOP_DEV === '1' || !app.isPackaged;
@@ -156,6 +155,7 @@ async function launchDesktop(): Promise<void> {
     dataDir,
     codexRuntimeRoot,
     creatorRuntimeRoot,
+    creatorPresetAssetsRoot: development ? undefined : join(webRoot, 'creator-presets'),
     stickmanRuntimeRoot,
     defaultProjectRoot,
     development
@@ -177,6 +177,7 @@ async function launchDesktop(): Promise<void> {
     appVersion: app.getVersion(),
     isOfficialBuild: app.isPackaged && readOfficialBuildMarker(process.resourcesPath),
     isWindowActive: () => windowManager?.isActive() === true,
+    getDaemonConnection: () => daemon.currentConnection,
     fetchImpl: fetchDesktopRequest,
     endpointOverride: process.env.OPENCREATOR_TELEMETRY_URL
   });

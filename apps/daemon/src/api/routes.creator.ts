@@ -92,6 +92,7 @@ import { readCodexImageConfiguration } from '../image-generation/codex-runtime.j
 import type { CodexNativeImageRuntime } from '../image-generation/provider.js';
 import type { CreatorIssueService } from '../creator/issues.js';
 import { registerCreatorThumbnailRoutes } from './routes.creator-thumbnail.js';
+import { GatewayError } from '../gateway/client.js';
 
 export async function registerCreatorRoutes(
   server: FastifyInstance,
@@ -115,6 +116,7 @@ export async function registerCreatorRoutes(
     stageRunner?: Pick<CreatorStageRunner, 'cancel' | 'cancelJob' | 'pauseDownload' | 'resumeDownload'>;
     presets?: CreatorPresetRegistry;
     presetCatalogRoot?: string;
+    presetAssetsRoot?: string;
     readServicesConfig?(): Promise<CreatorServicesConfig>;
     codexImageRuntime?: CodexNativeImageRuntime;
     issueService?: CreatorIssueService;
@@ -259,7 +261,7 @@ export async function registerCreatorRoutes(
     server.get('/creator-presets/:fileName', async (request, reply) => {
     try {
       const { fileName } = request.params as { fileName: string };
-      const file = resolveCreatorPresetAsset(presetCatalogRoot, fileName);
+      const file = resolveCreatorPresetAsset(presetCatalogRoot, fileName, options.presetAssetsRoot);
       const info = await stat(file);
       if (!info.isFile()) throw new Error('Preset asset is not a file');
       const rangeHeader = typeof request.headers.range === 'string'
@@ -1573,6 +1575,13 @@ function sendCreatorError(reply: FastifyReply, error: unknown, context?: Creator
     return reply.code(status).send(response(error.code as RuntimeErrorCode, error.message, {
       ...(error.latestRevision === undefined ? {} : { latestRevision: error.latestRevision })
     }));
+  }
+  if (error instanceof GatewayError && error.code === 'auth_required') {
+    return reply.code(401).send(response(
+      'GATEWAY_AUTH_REQUIRED',
+      'OpenCreator sign-in has expired. Sign in again before retrying.',
+      undefined
+    ));
   }
   if (error instanceof ZodError || error instanceof TypeError) {
     return reply.code(400).send(response('VALIDATION_FAILED', error.message));

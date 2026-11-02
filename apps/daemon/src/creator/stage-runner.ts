@@ -33,6 +33,8 @@ import {
   CreatorOutputValidationError,
   validateCreatorStageOutputs
 } from './output-validation.js';
+import type { CreatorTelemetrySink } from '../telemetry/creator.js';
+import { creatorStageTelemetryOutcome } from '../telemetry/creator.js';
 
 export type CreatorStageRunner = ReturnType<typeof createCreatorStageRunner>;
 
@@ -43,6 +45,7 @@ export function createCreatorStageRunner(input: {
   executors: CreatorExecutor[];
   workRoot: string;
   maxConcurrency?: number;
+  telemetry?: CreatorTelemetrySink;
   beforeRun?(job: CreatorJob, stageId: string): void | Promise<void>;
   onJobChanged?(job: CreatorJob): void;
   onStageChanged?(stage: CreatorStageRun): void;
@@ -169,6 +172,7 @@ export function createCreatorStageRunner(input: {
             });
           }
         });
+        emitStageFinished(stageRun.id);
         return input.repository.listStageRuns(jobId).find(candidate => candidate.id === stageRun!.id)!;
       }
       await input.beforeRun?.(input.repository.getJob(jobId)!, stageId);
@@ -191,6 +195,11 @@ export function createCreatorStageRunner(input: {
       const startedJob = requireJob(input.repository, jobId);
       updateJob(input.repository, startedJob, stage.jobCompletionPolicy === 'preserve' ? startedJob.status : 'running',
         isBackgroundSourceDownload(stageRun) ? {} : { currentStage: stageId }, input.onJobChanged);
+      input.telemetry?.stageStarted(
+        startedJob,
+        input.repository.getStageRun(stageRun.id) ?? stageRun,
+        template.id
+      );
       const result = await executor.run({
         stageRun: input.repository.listStageRuns(jobId).find(candidate => candidate.id === stageRun!.id)!,
         job: input.repository.getJob(jobId)!,
@@ -357,6 +366,7 @@ export function createCreatorStageRunner(input: {
       });
       const completed = input.repository.getStageRun(stageRun.id);
       if (completed !== undefined) {
+        emitStageFinished(completed.id);
         try {
           input.onStageSucceeded?.(completed);
         } catch {
@@ -502,6 +512,7 @@ export function createCreatorStageRunner(input: {
             }
           }
         });
+        emitStageFinished(stageRun.id);
       }
       if (stageRun === undefined) throw error;
     } finally {
@@ -512,16 +523,37 @@ export function createCreatorStageRunner(input: {
     return input.repository.listStageRuns(jobId).find(candidate => candidate.id === stageRun!.id)!;
   }
 
+  function emitStageFinished(stageRunId: string): void {
+    if (input.telemetry === undefined) return;
+    const stage = input.repository.getStageRun(stageRunId);
+    const job = stage === undefined ? undefined : input.repository.getJob(stage.jobId);
+    if (stage === undefined || job === undefined) return;
+    const template = input.templates.get(job.templateId, job.templateVersion);
+    const unknownRemoteAcceptance = providerLedger.requestsForStage(stageRunId)
+      .some(request => request.status === 'unknown_remote_acceptance');
+    const issue = (job.issues ?? []).find(candidate => (
+      candidate.stageRunId === stageRunId && candidate.status !== 'resolved'
+    ));
+    input.telemetry.stageFinished(
+      job,
+      stage,
+      template.id,
+      creatorStageTelemetryOutcome(job, stage, unknownRemoteAcceptance),
+      issue
+    );
+  }
+
   function updateStageRun(
     update: Parameters<CreatorRepository['updateStageRun']>[0]
   ): CreatorStageRun {
     const current = input.repository.getStageRun(update.id);
     const download = current?.stageId === 'download' && current.executor === 'download';
+    const progress = mergeStageProgress(current, update.progress) ?? (download ? current?.progress : undefined);
     input.repository.updateStageRun({
       ...update,
-      ...(update.progress === undefined && !download
+      ...(progress === undefined && !download
         ? {}
-        : { progress: { ...(current?.progress ?? {}), ...update.progress,
+        : { progress: { ...(progress ?? {}),
           ...(download ? { downloadProgressSequence: (Number(current.progress.downloadProgressSequence) || 0) + 1 } : {}) } })
     });
     const stage = input.repository.getStageRun(update.id);
@@ -530,6 +562,33 @@ export function createCreatorStageRunner(input: {
     }
     input.onStageChanged?.(stage);
     return stage;
+  }
+
+  function mergeStageProgress(
+    current: CreatorStageRun | undefined,
+    incoming: Record<string, CreatorJson> | undefined
+  ): Record<string, CreatorJson> | undefined {
+    if (incoming === undefined) return undefined;
+    const progress = { ...(current?.progress ?? {}), ...incoming };
+    const currentPercent = current?.progress.percent;
+    const incomingPercent = incoming.percent;
+    if (typeof currentPercent === 'number' && Number.isFinite(currentPercent)
+      && (incomingPercent === null
+        || (typeof incomingPercent === 'number' && Number.isFinite(incomingPercent)
+          && incomingPercent < currentPercent))) {
+      progress.percent = currentPercent;
+    }
+    const currentPhasePercent = current?.progress.phasePercent;
+    const incomingPhasePercent = incoming.phasePercent;
+    if (current?.progress.phase === 'normalizing_media'
+      && incoming.phase === 'normalizing_media'
+      && typeof currentPhasePercent === 'number' && Number.isFinite(currentPhasePercent)
+      && (incomingPhasePercent === null
+        || (typeof incomingPhasePercent === 'number' && Number.isFinite(incomingPhasePercent)
+          && incomingPhasePercent < currentPhasePercent))) {
+      progress.phasePercent = currentPhasePercent;
+    }
+    return progress;
   }
 
   function finishStageIssueResolution(
@@ -649,6 +708,7 @@ export function createCreatorStageRunner(input: {
           );
         }
       });
+      if (canceled !== undefined) emitStageFinished(canceled.id);
       return canceled;
   }
 

@@ -203,6 +203,9 @@ import {
   creatorStageEventId
 } from '../creator/events.js';
 import { createCreatorRepository } from '../creator/repository.js';
+import { createCreatorTelemetryOutbox } from '../telemetry/outbox.js';
+import { createCreatorTelemetrySink } from '../telemetry/creator.js';
+import { registerTelemetryRoutes } from '../telemetry/routes.js';
 import { createCreatorIssueService } from '../creator/issues.js';
 import { createCreatorService, type CreatorService } from '../creator/service.js';
 import {
@@ -319,6 +322,7 @@ export type BuildServerInput = {
   creatorService?: CreatorService;
   creatorPresetRegistry?: CreatorPresetRegistry;
   creatorPresetCatalogRoot?: string;
+  creatorPresetAssetsRoot?: string;
   creatorReferenceImageUploadService?: CreatorReferenceImageUploadService;
   creatorReferenceImageMaxSizeBytes?: number;
   creatorSourceUploadService?: CreatorSourceUploadService;
@@ -404,6 +408,7 @@ export async function buildServer(input: BuildServerInput) {
   );
   const db = input.db ?? openRuntimeDatabase(join(dataDir, 'app.sqlite'));
   const ownsDb = input.db === undefined;
+  const creatorTelemetryOutbox = createCreatorTelemetryOutbox(db);
   const runRepository = createRunRepository(db);
   const threadRepository = createThreadRepository(db);
   const scheduleRepository = new ScheduleRepository(db);
@@ -613,18 +618,44 @@ export async function buildServer(input: BuildServerInput) {
     }
   });
   await gatewayAccount.initialize();
+  const creatorTelemetry = createCreatorTelemetrySink({
+    outbox: creatorTelemetryOutbox,
+    readAccount() {
+      const account = gatewayAccount.peekState();
+      const recharge = gatewayAccount.peekTelemetryRechargeState();
+      return {
+        authState: account.authState === 'signed_in'
+          ? 'signed_in'
+          : account.authState === 'signed_out' ? 'signed_out' : 'unknown',
+        rechargeState: recharge.state,
+        accountStateObservedAt: recharge.observedAt
+      };
+    }
+  });
   const creatorAgentRepository = createCreatorAgentRepository(db);
   const creatorAgentReconciler = createCreatorAgentReconciler({
     repository: creatorAgentRepository
   });
   creatorAgentReconciler.reconcileAfterDaemonRestart();
   const creatorTemplates = createDefaultCreatorTemplateRegistry();
+  for (const stage of creatorRepository.listRecoveredInterruptedStageRuns?.() ?? []) {
+    const job = creatorRepository.getJob(stage.jobId);
+    if (job === undefined) continue;
+    const template = creatorTemplates.get(job.templateId, job.templateVersion);
+    creatorTelemetry.stageFinished(job, stage, template.id, 'interrupted');
+  }
   const creatorPresetCatalogRoot = resolve(
     input.creatorPresetCatalogRoot ?? resolveCreatorPresetCatalogRoot()
+  );
+  const creatorPresetAssetsRoot = resolve(
+    input.creatorPresetAssetsRoot
+      ?? (process.env.OPENCREATOR_PRESET_ASSETS_ROOT?.trim()
+        || join(creatorPresetCatalogRoot, 'assets'))
   );
   const creatorPresetRegistry = input.creatorPresetRegistry
     ?? await loadCreatorPresetCatalog({
       root: creatorPresetCatalogRoot,
+      assetsRoot: creatorPresetAssetsRoot,
       templates: creatorTemplates,
       verificationCachePath: join(
         dataDir,
@@ -760,7 +791,8 @@ export async function buildServer(input: BuildServerInput) {
     templates: creatorTemplates,
     providerRequestLedger: creatorProviderRequestLedger,
     presets: creatorPresetRegistry,
-    creatorServicesConfig: creatorServicesConfigStore
+    creatorServicesConfig: creatorServicesConfigStore,
+    telemetry: creatorTelemetry
   });
   const creatorRuntimeRoot = process.env.OPENCREATOR_CREATOR_RUNTIME_ROOT
     ?? join(runtimeDir, 'krillinai');
@@ -1119,6 +1151,7 @@ export async function buildServer(input: BuildServerInput) {
         issueService: creatorIssueService,
         templates: creatorService.templates,
         workRoot: creatorJobsRoot,
+        telemetry: creatorTelemetry,
         executors: creatorExecutors.map(executor => ({
           id: executor.id,
           supportsProcessPause: executor.supportsProcessPause,
@@ -1669,6 +1702,7 @@ export async function buildServer(input: BuildServerInput) {
     stageRunner: creatorStageRunner,
     presets: creatorPresetRegistry,
     presetCatalogRoot: creatorPresetCatalogRoot,
+    presetAssetsRoot: creatorPresetAssetsRoot,
     readServicesConfig: () => creatorServicesConfigStore.read(),
     codexImageRuntime,
     preflight: creatorPreflight,
@@ -1689,6 +1723,7 @@ export async function buildServer(input: BuildServerInput) {
     maxSizeBytes: input.attachmentMaxSizeBytes
   });
   await registerApprovalRoutes(server, approvalManager);
+  await registerTelemetryRoutes(server, creatorTelemetryOutbox);
   await registerNotificationRoutes(server, notificationService);
   await registerTaskRoutes(server, taskService);
   await registerMemoryRoutes(server, memoryService, {
