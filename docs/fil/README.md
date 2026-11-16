@@ -595,7 +595,7 @@ Hindi kailangan ng karamihan ang environment variable. Gamitin kapag kailangan n
 | Environment variable | Default | Layunin |
 | --- | --- | --- |
 | `OPENCREATOR_DATA_DIR` | `.runtime` | Database, Run, attachment, at managed workspace ng OpenCreator |
-| `OPENCREATOR_GATEWAY_ORIGIN` | `https://www.open-creator.ai` | Gateway para sa login, subscription, credit, at opisyal na modelo; palitan para sa lokal na Gateway |
+| `OPENCREATOR_GATEWAY_ORIGIN` | `https://open-creator.ai` | Gateway para sa login, subscription, credit, at opisyal na modelo; palitan para sa lokal na Gateway |
 | `OPENCREATOR_CODEX_BIN` | `codex` | Path ng Codex CLI executable |
 | `CODEX_HOME` | `~/.codex` | Awtoridad para sa Codex session, configuration, Skills, MCP, at Profile |
 | `OPENCREATOR_DEFAULT_CWD` | Kasalukuyang working directory | Default na working directory ng daemon |
@@ -684,7 +684,7 @@ Ang root na `README.md` ang pamantayang dokumento sa English. Nasa `docs/<locale
 
 ## Komunidad
 
-<p>May GitHub user mula sa <strong>hindi bababa sa 107 bansa at rehiyon</strong> na nag-star sa OpenCreator.</p>
+<p>May GitHub user mula sa <strong>hindi bababa sa 108 bansa at rehiyon</strong> na nag-star sa OpenCreator.</p>
 
 <img src="../images/star-coverage-map.svg" alt="Mapa ng mga bansa at rehiyon na may nag-star sa OpenCreator sa GitHub" width="760" />
 
