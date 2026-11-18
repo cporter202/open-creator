@@ -3,6 +3,8 @@ import {
   creatorPromptMaxLength,
   defaultVideoGenerationModels,
   gatewayVideoSizes,
+  googleOmniVideoDurations,
+  googleOmniVideoSizes,
   isPublicErrorFacts,
   readCreatorResultSnapshots,
   sanitizePublicErrorFacts,
@@ -25,7 +27,6 @@ import {
   Download,
   ImagePlus,
   LoaderCircle,
-  RefreshCw,
   RotateCcw,
   Sparkles,
   Trash2,
@@ -34,7 +35,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocalizedCopy, type LocalizeCopy } from '../../i18n/useLocalizedCopy.js';
-import { publicErrorReason } from '../issues/issue-catalog.js';
+import { mediaContentSafetyReason, publicErrorReason } from '../issues/issue-catalog.js';
 import OfficialModelSelect, { compareGatewayModelsByName } from '../../components/forms/OfficialModelSelect.js';
 import { useOfficialServices } from './official-services.js';
 import { readVideoReferences, videoReferenceIssue } from './OfficialVideoReferences.js';
@@ -45,6 +46,7 @@ import ImageGenerationSettings, { type ImageGenerationSettingSection } from './I
 import { CreatorTaskProgressNotice } from './CreatorCollaborationPanel.js';
 import CreatorTaskSummary from './CreatorTaskSummary.js';
 import CreatorToolShell from './CreatorToolShell.js';
+import { IssueNotice } from '../issues/IssuePresenter.js';
 import {
   captureCreatorClientFailure,
   createCreatorArtifactObjectUrl,
@@ -63,18 +65,19 @@ const sizes: Array<{ value: VideoGenerationSize; zh: string; en: string; ratio: 
   { value: '720x1280', zh: '竖屏', en: 'Portrait', ratio: '9:16' },
   { value: '1024x1024', zh: '方形', en: 'Square', ratio: '1:1' }
 ];
+const googleOmniSizes = sizes.filter(size => googleOmniVideoSizes.some(value => value === size.value));
 
 const providers: Array<{ value: VideoGenerationProvider; zh: string; en: string }> = [
   { value: 'seedance', zh: 'Seedance', en: 'Seedance' },
   { value: 'kling', zh: '可灵', en: 'Kling' },
-  { value: 'veo', zh: 'Veo', en: 'Veo' }
+  { value: 'veo', zh: 'Gemini Omni Flash', en: 'Gemini Omni Flash' }
 ];
 const localVideoModelId = '__local_video__';
 
-const providerDurations: Record<VideoGenerationProvider, VideoGenerationDuration[]> = {
+const providerDurations: Record<VideoGenerationProvider, readonly VideoGenerationDuration[]> = {
   seedance: [5, 10],
   kling: [5, 10],
-  veo: [4, 6, 8]
+  veo: googleOmniVideoDurations
 };
 const modelLabels: Record<string, string> = {
   'doubao-seedance-2-5-260628': 'Seedance 2.5',
@@ -85,7 +88,8 @@ const modelLabels: Record<string, string> = {
   'doubao-seedance-1-0-pro-fast-251015': 'Seedance 1.0 Pro Fast',
   'doubao-seedance-1-0-pro-250528': 'Seedance 1.0 Pro',
   'kling-v2-1-master': 'Kling 2.1 Master',
-  'veo-3.1-generate-preview': 'Veo 3.1'
+  'veo-3.1-generate-preview': 'Veo 3.1',
+  [defaultVideoGenerationModels.veo]: 'Gemini Omni 1.2 Flash'
 };
 
 const samplePromptZh = '一辆复古红色跑车沿着海岸公路行驶，黄昏金色阳光，低机位跟拍，海风吹动路边植物，电影级真实质感，镜头运动平稳';
@@ -125,7 +129,6 @@ export default function VideoGenerationWorkspace(props: {
   const [videoConfig, setVideoConfig] = useState<CreatorServicesConfig['video'] | null>(null);
   const [configuredCredentials, setConfiguredCredentials] = useState<CreatorServicesCredentialField[]>([]);
   const [publicCatalog, setPublicCatalog] = useState<GatewayVideoCatalog | undefined>(() => props.gatewayAccountService?.getCachedVideoCatalog?.());
-  const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'error'>(() => props.gatewayAccountService?.getCachedVideoCatalog?.() ? 'ready' : 'loading');
   const catalogRequest = useRef(0);
   const catalogWork = useRef<{ service: GatewayAccountSettingsService; promise: Promise<GatewayVideoCatalog> }>();
   const [pendingModelId, setPendingModelId] = useState<string | undefined>(() => readOptionalModel(session?.state.pendingVideoModelId));
@@ -180,37 +183,35 @@ export default function VideoGenerationWorkspace(props: {
   const localModel: GatewayModel | undefined = videoConfig ? {
     id: localVideoModelId, name: l('本地视频服务', 'Local video service', 'Lokal videotjänst'),
     vendor: l('本地', 'Local', 'Lokal'), modality: 'video', capabilities: [],
-    status: localConfigured ? 'ready' : 'temporarily_unavailable', durations: providerDurations[provider]
+    status: localConfigured ? 'ready' : 'temporarily_unavailable', durations: [...providerDurations[provider]]
   } : undefined;
   const publicModels = publicCatalog?.models ?? [];
   const catalogModels = [...(localModel ? [localModel] : []), ...(official.official ? official.models : publicModels)];
   const loginRequiredModelIds = new Set(official.official ? [] : publicModels.map(item => item.id));
   const selectedCatalogId = usingOfficial ? official.selected ?? official.model?.id ?? '' : pendingModelId ?? (localConfigured ? localVideoModelId : '');
-  function loadPublicCatalog(force = false) {
+  function loadPublicCatalog() {
     const request = ++catalogRequest.current;
     const service = props.gatewayAccountService;
-    if (!service?.getVideoCatalog) { setCatalogState('error'); return; }
-    const cached = service.getCachedVideoCatalog?.();
-    if (cached) { setPublicCatalog(cached); setCatalogState('ready'); }
-    else setCatalogState('loading');
-    const promise = !force && catalogWork.current?.service === service
-      ? catalogWork.current.promise : service.getVideoCatalog({ refresh: force });
+    const cached = service?.getCachedVideoCatalog?.();
+    setPublicCatalog(cached);
+    if (!service?.getVideoCatalog) return;
+    const promise = catalogWork.current?.service === service
+      ? catalogWork.current.promise : service.getVideoCatalog();
     catalogWork.current = { service, promise };
     void promise.then(catalog => {
-      if (request === catalogRequest.current) { setPublicCatalog(catalog); setCatalogState('ready'); }
-    }).catch(() => {
-      if (request === catalogRequest.current) setCatalogState(cached ? 'ready' : 'error');
-    }).finally(() => {
+      if (request === catalogRequest.current) setPublicCatalog(catalog);
+    }).catch(() => undefined).finally(() => {
       if (catalogWork.current?.promise === promise) catalogWork.current = undefined;
     });
   }
   useEffect(() => {
-    if (!official.official) loadPublicCatalog();
     return () => { catalogRequest.current++; };
-  }, [props.gatewayAccountService, official.official]);
-  const activeModel = usingOfficial ? official.model?.id ?? '' : model;
+  }, [props.gatewayAccountService]);
+  const localOmni = !usingOfficial && provider === 'veo';
+  const unsupportedLocalOmniRatio = localOmni && size === '1024x1024';
+  const activeModel = usingOfficial ? official.model?.id ?? '' : localOmni ? defaultVideoGenerationModels.veo : model;
   const selectedModelLabel = usingOfficial && official.model ? gatewayModelDisplayName(official.model, l('官方模型', 'Official model')) : videoModelLabel(activeModel);
-  const availableSizes = usingOfficial ? gatewayVideoSizes(official.model).map(videoSizeOption) : sizes;
+  const availableSizes = usingOfficial ? gatewayVideoSizes(official.model).map(videoSizeOption) : localOmni ? googleOmniSizes : sizes;
   const selectedSize = availableSizes.find(item => item.value === size) ?? videoSizeOption(size);
   const availableRatios = [...new Set(availableSizes.map(item => item.ratio))];
   const resolutionSizes = availableSizes.filter(item => item.ratio === selectedSize.ratio);
@@ -410,9 +411,9 @@ export default function VideoGenerationWorkspace(props: {
   }, [pendingModelId, official.authState, official.activationState, props.gatewayAccountService, props.onGatewayStateChange, session?.job.id]);
 
   useEffect(() => {
-    if (availableSizes.length && !availableSizes.some(item => item.value === size)) setSize(availableSizes[0]!.value);
+    if (!unsupportedLocalOmniRatio && availableSizes.length && !availableSizes.some(item => item.value === size)) setSize(availableSizes[0]!.value);
     if (durations.length && !durations.includes(duration)) setDuration(durations[0]!);
-  }, [usingOfficial, activeModel, size, duration, availableSizes.map(item => item.value).join(','), durations.join(',')]);
+  }, [usingOfficial, activeModel, size, duration, unsupportedLocalOmniRatio, availableSizes.map(item => item.value).join(','), durations.join(',')]);
 
   useEffect(() => {
     const { session, localize } = mediaPreviewContextRef.current;
@@ -599,6 +600,12 @@ export default function VideoGenerationWorkspace(props: {
     }
     if (!usingOfficial && !localConfigured) {
       setError(l('请先在设置中配置可用的本地视频服务。', 'Configure a ready local video service in Settings first.', 'Konfigurera en tillgänglig lokal videotjänst i inställningarna först.'));
+      return;
+    }
+    if (unsupportedLocalOmniRatio) {
+      setError(l('Gemini Omni Flash 不支持方形画幅，请选择横屏或竖屏。',
+        'Gemini Omni Flash does not support square video. Select a landscape or portrait format.',
+        'Gemini Omni Flash stöder inte kvadratisk video. Välj liggande eller stående format.'));
       return;
     }
     if (!usingOfficial && savedVideoImage) {
@@ -889,6 +896,10 @@ export default function VideoGenerationWorkspace(props: {
       pageClassName="video-generation-workspace-page"
       contentClassName="media-generation-workspace-content"
       currentIssue={visibleError || undefined}
+      workspaceIssue={!error && visibleError && visibleError !== previewError ? {
+        title: `${l('视频生成', 'Video generation')} · ${l('失败', 'Failed')}`,
+        description: visibleError
+      } : undefined}
       onCancelTask={generating ? () => void cancelTask() : undefined}
       taskControlPending={taskControlPending}
       embedded={props.embedded && !selectedResult}
@@ -993,16 +1004,11 @@ export default function VideoGenerationWorkspace(props: {
                         title: l('配置本地视频服务', 'Configure local video service', 'Konfigurera lokal videotjänst'),
                         onConfigure: () => { window.location.hash = '#/settings?tab=ai-services&section=video'; }
                       } : undefined}
+                      onOpen={!official.official ? loadPublicCatalog : undefined}
                       onChange={selectCatalogModel}
                       models={catalogModels}
                     />
                   </label>
-                {!official.official && catalogState !== 'ready' ? <div className="video-generation-catalog-status" role="status">
-                  {catalogState === 'loading' ? l('正在加载官方视频模型…', 'Loading official video models…', 'Läser in officiella videomodeller…') : <>
-                    <span>{l('官方视频模型目录加载失败', 'Official video models could not load', 'Kunde inte läsa in officiella videomodeller')}</span>
-                    <button type="button" onClick={() => loadPublicCatalog(true)} aria-label={l('重试加载视频模型', 'Retry loading video models', 'Försök läsa in videomodeller igen')}><RefreshCw size={14} />{l('重试', 'Retry', 'Försök igen')}</button>
-                  </>}
-                </div> : null}
               </div>
               <ImageGenerationSettings
                 label={l('视频设置', 'Video settings', 'Videoinställningar')}
@@ -1085,17 +1091,10 @@ export default function VideoGenerationWorkspace(props: {
             ) : null}
           </section>
         ) : null}
-        {error ? (
-          <p className="creator-tool-error" role="alert">
-            {error}
-            {settingsDeepLink ? (
-              <>
-                {' '}
-                <a href={settingsDeepLink}>{l('打开 AI 服务设置', 'Open AI service settings')}</a>
-              </>
-            ) : null}
-          </p>
-        ) : null}
+        {error ? <IssueNotice title={`${l('视频生成', 'Video generation')} · ${l('失败', 'Failed')}`}
+          description={error}
+          settingsLink={settingsDeepLink ? { href: settingsDeepLink, label: l('打开 AI 服务设置', 'Open AI service settings') } : undefined}
+        /> : null}
         {notice ? <p className="creator-tool-notice" role="status">{notice}</p> : null}
       </div>
     </CreatorToolShell>
@@ -1228,7 +1227,7 @@ function videoModelDefaults(
       ? defaultVideoGenerationModels.seedance
       : config.video.seedance.model.trim() || defaultVideoGenerationModels.seedance,
     kling: config.video.kling.model.trim() || defaultVideoGenerationModels.kling,
-    veo: config.video.veo.model.trim() || defaultVideoGenerationModels.veo
+    veo: defaultVideoGenerationModels.veo
   };
 }
 
@@ -1237,7 +1236,7 @@ function localVideoProviderReady(
   credentials: CreatorServicesCredentialField[],
   provider: VideoGenerationProvider
 ): boolean {
-  if (!config[provider].model.trim()) return false;
+  if (provider !== 'veo' && !config[provider].model.trim()) return false;
   return provider === 'kling'
     ? credentials.includes('video.kling.accessKey') && credentials.includes('video.kling.secretKey')
     : credentials.includes(`video.${provider}.apiKey` as CreatorServicesCredentialField);
@@ -1425,8 +1424,15 @@ function formatVideoError(
   const suppliedFacts = typeof error === 'object' && error !== null && 'publicFacts' in error
     && typeof error.publicFacts === 'object' && error.publicFacts !== null
     ? sanitizePublicErrorFacts(error.publicFacts as PublicErrorFacts) : undefined;
+  if (suppliedFacts?.provider === 'veo' && suppliedFacts.upstreamCode === 'model_retired') {
+    return l('此任务使用了已停用的 Veo 直连模型，请使用 Gemini Omni Flash 重新生成。',
+      'This task used a retired direct Veo model. Generate again with Gemini Omni Flash.',
+      'Uppgiften använde en utfasad direktansluten Veo-modell. Generera igen med Gemini Omni Flash.');
+  }
   if (suppliedFacts && isPublicErrorFacts(suppliedFacts) && suppliedFacts.kind !== 'unknown') {
     if (suppliedFacts.provider === 'opencreator-gateway-video') {
+      const contentReason = mediaContentSafetyReason(suppliedFacts, l);
+      if (contentReason) return contentReason;
       if (suppliedFacts.upstreamCode === 'video_price_changed') return l(
         '视频生成未完成，请重试', 'Video generation did not complete. Try again.', 'Videogenereringen slutfördes inte. Försök igen.'
       );
@@ -1442,10 +1448,10 @@ function formatVideoError(
       if (suppliedFacts.kind === 'timeout') return l(
         '请求超时，请稍后重试', 'The request timed out. Try again later.', 'Förfrågan tog för lång tid. Försök igen senare.'
       );
-      if (suppliedFacts.httpStatus === 400 || suppliedFacts.httpStatus === 422) return l(
+      if (suppliedFacts.upstreamCode === 'invalid_parameters' || suppliedFacts.upstreamCode === 'invalid_parameter') return l(
         '当前模型不支持这些参数，请调整设置后重试', 'This model does not support these settings. Adjust them and try again.', 'Modellen stöder inte dessa inställningar. Ändra dem och försök igen.'
       );
-      return l('官方视频服务暂不可用，请稍后重试', 'The official video service is unavailable. Try again later.', 'Den officiella videotjänsten är inte tillgänglig. Försök igen senare.');
+      return publicErrorReason({ ...suppliedFacts, upstreamMessage: undefined }, l);
     }
     return publicErrorReason(suppliedFacts, l);
   }
